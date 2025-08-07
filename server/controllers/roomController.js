@@ -359,7 +359,7 @@ export const declareWinner = async (req, res) => {
     const userId = req.user._id;
     const { roomId } = req.params;
     const { winnerId } = req.body;
-
+    console.log(userId, roomId, winnerId)
     if (!winnerId) {
       return res.status(400).json({
         success: false,
