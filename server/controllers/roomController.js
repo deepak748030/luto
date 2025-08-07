@@ -1,6 +1,7 @@
 import GameRoom from '../models/GameRoom.js';
 import User from '../models/User.js';
 import Transaction from '../models/Transaction.js';
+import mongoose from 'mongoose';
 import { cache, cacheUtils } from '../utils/cache.js';
 import { getPagination, buildPaginationResponse, calculateWinnings } from '../utils/helpers.js';
 
@@ -68,7 +69,7 @@ export const getRooms = async (req, res) => {
 export const createRoom = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { gameType = 'Ludo', amount, maxPlayers = 4, roomCode } = req.body;
+    const { gameType = 'Ludo', amount, maxPlayers = 4, roomId } = req.body;
 
     // Validate input
     if (!amount || amount <= 0) {
@@ -85,21 +86,13 @@ export const createRoom = async (req, res) => {
       });
     }
 
-    // Validate room code if provided
-    if (roomCode) {
-      if (!/^[A-Z]{2}[0-9]{6}$/.test(roomCode)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Room code must be in format LK123456 (2 letters + 6 digits)'
-        });
-      }
-
-      // Check if room code already exists
-      const existingRoom = await GameRoom.findOne({ roomId: roomCode });
+    // Check if room ID already exists
+    if (roomId) {
+      const existingRoom = await GameRoom.findOne({ roomId });
       if (existingRoom) {
         return res.status(400).json({
           success: false,
-          message: 'Room code already exists. Please choose a different code.'
+          message: 'Room ID already exists. Please choose a different ID.'
         });
       }
     }
@@ -127,15 +120,15 @@ export const createRoom = async (req, res) => {
       });
     }
 
-    // Use provided room code or generate unique room ID
-    let roomId = roomCode;
-    if (!roomCode) {
+    // Use provided room ID or generate unique room ID
+    let finalRoomId = roomId;
+    if (!roomId) {
       let attempts = 0;
       do {
         const randomNum = Math.floor(100000 + Math.random() * 900000);
-        roomId = `LK${randomNum}`;
+        finalRoomId = `LK${randomNum}`;
         attempts++;
-      } while (await GameRoom.findOne({ roomId }) && attempts < 10);
+      } while (await GameRoom.findOne({ roomId: finalRoomId }) && attempts < 10);
 
       if (attempts >= 10) {
         return res.status(500).json({
@@ -157,10 +150,10 @@ export const createRoom = async (req, res) => {
         userId,
         'game_loss',
         amount,
-        `Game Entry - Room ${roomId}`,
+        `Game Entry - Room ${finalRoomId}`,
         {
           metadata: {
-            roomCode: roomId,
+            roomCode: finalRoomId,
             action: 'room_creation'
           }
         }
@@ -168,7 +161,7 @@ export const createRoom = async (req, res) => {
 
       // Create room
       room = new GameRoom({
-        roomId,
+        roomId: finalRoomId,
         gameType,
         amount,
         maxPlayers,

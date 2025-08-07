@@ -20,13 +20,7 @@ const gameRoomSchema = new mongoose.Schema({
   roomId: {
     type: String,
     required: [true, 'Room ID is required'],
-    uppercase: true,
-    validate: {
-      validator: function (v) {
-        return /^[A-Z]{2}[0-9]{6}$/.test(v);
-      },
-      message: 'Room ID must be in format LK123456'
-    }
+    trim: true
   },
   gameType: {
     type: String,
