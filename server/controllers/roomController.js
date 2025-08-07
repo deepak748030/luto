@@ -359,7 +359,7 @@ export const declareWinner = async (req, res) => {
     const userId = req.user._id;
     const { roomId } = req.params;
     const { winnerId } = req.body;
-    console.log(userId, roomId, winnerId)
+
     if (!winnerId) {
       return res.status(400).json({
         success: false,
@@ -379,8 +379,8 @@ export const declareWinner = async (req, res) => {
       });
     }
 
-    // Check if user is in the room
-    if (!room.hasPlayer(userId)) {
+    // Check if authenticated user is in the room (only players can declare winner)
+    if (!room.hasPlayer(userId.toString())) {
       return res.status(403).json({
         success: false,
         message: 'You are not a player in this room'
@@ -396,7 +396,7 @@ export const declareWinner = async (req, res) => {
     }
 
     // Check if winner is in the room
-    if (!room.hasPlayer(winnerId)) {
+    if (!room.hasPlayer(winnerId.toString())) {
       return res.status(400).json({
         success: false,
         message: 'Winner must be a player in the room'

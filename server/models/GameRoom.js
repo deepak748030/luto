@@ -92,7 +92,11 @@ gameRoomSchema.virtual('isFull').get(function () {
 
 // Method to check if user is in room
 gameRoomSchema.methods.hasPlayer = function (userId) {
-  return this.players.some(player => player.userId.toString() === userId.toString());
+  return this.players.some(player => {
+    const playerIdStr = player.userId._id ? player.userId._id.toString() : player.userId.toString();
+    const userIdStr = userId.toString();
+    return playerIdStr === userIdStr;
+  });
 };
 
 // Method to add player to room
