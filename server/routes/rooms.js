@@ -176,6 +176,11 @@ router.get('/my-rooms', [
  *                 enum: [Ludo, Snakes & Ladders, Carrom]
  *                 default: Ludo
  *                 example: "Ludo"
+ *               roomCode:
+ *                 type: string
+ *                 pattern: "^[A-Z]{2}[0-9]{6}$"
+ *                 example: "LK123456"
+ *                 description: "Optional custom room code (2 letters + 6 digits)"
  *               amount:
  *                 type: number
  *                 minimum: 10
@@ -213,6 +218,10 @@ router.post('/create', [
     .optional()
     .isIn(['Ludo', 'Snakes & Ladders', 'Carrom'])
     .withMessage('Invalid game type'),
+  body('roomCode')
+    .optional()
+    .matches(/^[A-Z]{2}[0-9]{6}$/)
+    .withMessage('Room code must be in format LK123456 (2 letters + 6 digits)'),
   body('amount')
     .isFloat({ min: 10, max: 10000 })
     .withMessage('Amount must be between ₹10 and ₹10,000'),
