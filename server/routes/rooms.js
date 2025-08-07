@@ -267,10 +267,7 @@ router.post('/create', [
  */
 // Join room
 router.post('/:roomId/join', [
-  param('roomId')
-    .matches(/^LK[0-9]{6}$/)
-    .withMessage('Invalid room ID format')
-], validateRequest, joinRoom);
+], joinRoom);
 
 /**
  * @swagger
@@ -349,9 +346,6 @@ router.post('/:roomId/join', [
  */
 // Declare winner
 router.put('/:roomId/declare-winner', [
-  param('roomId')
-    .matches(/^LK[0-9]{6}$/)
-    .withMessage('Invalid room ID format'),
   body('winnerId')
     .isMongoId()
     .withMessage('Invalid winner ID')
@@ -386,7 +380,6 @@ router.put('/:roomId/declare-winner', [
  */
 // Leave room
 router.post('/:roomId/leave', [
-]
-)
+], validateRequest, leaveRoom);
 
 export default router;
