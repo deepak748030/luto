@@ -22,7 +22,11 @@ import {
     getSystemStats,
     getRevenueStats,
     getUserActivity,
-    exportData
+    exportData,
+    getWinnerRequests,
+    getWinnerRequestDetails,
+    approveWinnerRequest,
+    rejectWinnerRequest
 } from '../controllers/adminController.js';
 
 const router = express.Router();
@@ -221,5 +225,28 @@ router.get('/export/:type', [
     query('startDate').optional().isISO8601(),
     query('endDate').optional().isISO8601()
 ], validateRequest, exportData);
+
+// Winner Verification Management
+router.get('/winner-requests', [
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 100 }),
+    query('status').optional().isIn(['all', 'pending', 'approved', 'rejected']),
+    query('sortBy').optional().isIn(['createdAt', 'winnerAmount']),
+    query('sortOrder').optional().isIn(['asc', 'desc'])
+], validateRequest, getWinnerRequests);
+
+router.get('/winner-requests/:requestId', [
+    param('requestId').isMongoId().withMessage('Invalid request ID')
+], validateRequest, getWinnerRequestDetails);
+
+router.put('/winner-requests/:requestId/approve', [
+    param('requestId').isMongoId().withMessage('Invalid request ID'),
+    body('notes').optional().trim()
+], validateRequest, approveWinnerRequest);
+
+router.put('/winner-requests/:requestId/reject', [
+    param('requestId').isMongoId().withMessage('Invalid request ID'),
+    body('reason').trim().notEmpty().withMessage('Rejection reason is required')
+], validateRequest, rejectWinnerRequest);
 
 export default router;

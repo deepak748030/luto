@@ -1,6 +1,7 @@
 import GameRoom from '../models/GameRoom.js';
 import User from '../models/User.js';
 import Transaction from '../models/Transaction.js';
+import WinnerRequest from '../models/WinnerRequest.js';
 import mongoose from 'mongoose';
 import { cache, cacheUtils } from '../utils/cache.js';
 import { getPagination, buildPaginationResponse, calculateWinnings } from '../utils/helpers.js';
@@ -403,62 +404,67 @@ export const declareWinner = async (req, res) => {
       });
     }
 
-    // Complete the game
-    room.completeGame(winnerId);
-    await room.save();
+    // Check if there's already a pending request for this room
+    const existingRequest = await WinnerRequest.findOne({
+      gameRoomId: room._id,
+      status: 'pending'
+    });
 
-    // Award winnings to winner
-    const winner = await User.findById(winnerId);
-    await Transaction.createWithBalanceUpdate(
-      winnerId,
-      'game_win',
-      room.winnerAmount,
-      `Game Won - Room ${room.roomId}`,
-      {
-        gameRoomId: room._id,
-        metadata: {
-          roomCode: room.roomId,
-          totalPlayers: room.players.length,
-          prizePool: room.totalPrizePool,
-          platformFee: room.platformFee
-        }
-      }
-    );
-
-    // Update winner's game stats
-    await winner.incrementGameStats(true, room.winnerAmount);
-
-    // Update other players' stats (losses)
-    for (const player of room.players) {
-      if (player.userId.toString() !== winnerId.toString()) {
-        const playerUser = await User.findById(player.userId);
-        await playerUser.incrementGameStats(false, 0);
-      }
+    if (existingRequest) {
+      return res.status(400).json({
+        success: false,
+        message: 'Winner verification request already submitted for this room'
+      });
     }
+
+    // Calculate winnings
+    const totalAmount = room.amount * room.players.length;
+    const platformFeePercent = parseInt(process.env.PLATFORM_FEE_PERCENTAGE) || 10;
+    const platformFee = Math.floor(totalAmount * platformFeePercent / 100);
+    const winnerAmount = totalAmount - platformFee;
+
+    // Create winner verification request
+    const winnerRequest = new WinnerRequest({
+      roomId: room.roomId,
+      gameRoomId: room._id,
+      declaredBy: userId,
+      declaredWinner: winnerId,
+      winnerAmount,
+      totalPrizePool: totalAmount,
+      platformFee
+    });
+
+    await winnerRequest.save();
+
+    // Update room status to indicate winner declared but pending verification
+    room.status = 'winner_declared';
+    room.winner = winnerId;
+    room.totalPrizePool = totalAmount;
+    room.platformFee = platformFee;
+    room.winnerAmount = winnerAmount;
+    await room.save();
 
     // Clear caches
     cacheUtils.clearRoomsCache();
-    for (const player of room.players) {
-      cache.del(cacheUtils.balanceKey(player.userId));
-      cacheUtils.clearUserCache(player.userId);
-    }
 
     res.status(200).json({
       success: true,
-      message: 'Winner declared successfully',
+      message: 'Winner declared successfully. Waiting for admin verification.',
       data: {
         room: {
           _id: room._id,
           roomId: room.roomId,
           status: room.status,
           winner: room.winner,
-          completedAt: room.completedAt
+          declaredAt: new Date()
         },
-        winnings: {
+        pendingWinnings: {
           amount: room.winnerAmount,
           totalPrizePool: room.totalPrizePool,
           platformFee: room.platformFee
-        }
+        },
+        requestId: winnerRequest._id,
+        message: 'Your winner declaration is pending admin verification. You will receive the winnings once approved.'
       }
     });
 

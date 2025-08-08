@@ -43,7 +43,7 @@ const gameRoomSchema = new mongoose.Schema({
   players: [playerSchema],
   status: {
     type: String,
-    enum: ['waiting', 'playing', 'completed', 'cancelled'],
+    enum: ['waiting', 'playing', 'winner_declared', 'completed', 'cancelled'],
     default: 'waiting'
   },
   winner: {

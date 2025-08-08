@@ -326,7 +326,7 @@ router.post('/:roomId/join', [
  *                             completedAt:
  *                               type: string
  *                               format: date-time
- *                         winnings:
+ *                         pendingWinnings:
  *                           type: object
  *                           properties:
  *                             amount:
@@ -335,6 +335,12 @@ router.post('/:roomId/join', [
  *                               type: number
  *                             platformFee:
  *                               type: number
+ *                         requestId:
+ *                           type: string
+ *                           description: Winner verification request ID
+ *                         message:
+ *                           type: string
+ *                           description: Information about verification process
  *       400:
  *         description: Game not in progress or invalid winner
  *       401:

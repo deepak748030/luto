@@ -2,6 +2,7 @@ import Admin from '../models/Admin.js';
 import User from '../models/User.js';
 import GameRoom from '../models/GameRoom.js';
 import Transaction from '../models/Transaction.js';
+import WinnerRequest from '../models/WinnerRequest.js';
 import jwt from 'jsonwebtoken';
 import { cache, cacheUtils } from '../utils/cache.js';
 import { getPagination, buildPaginationResponse } from '../utils/helpers.js';
@@ -164,7 +165,8 @@ export const getDashboardStats = async (req, res) => {
                 monthStats,
                 recentUsers,
                 recentTransactions,
-                topWinners
+                topWinners,
+                pendingWinnerRequests
             ] = await Promise.all([
                 // User stats
                 User.countDocuments({ isActive: true }),
@@ -220,7 +222,10 @@ export const getDashboardStats = async (req, res) => {
                     .sort({ totalWinnings: -1 })
                     .limit(5)
                     .select('name phone totalWinnings totalWins totalGames')
-                    .lean()
+                    .lean(),
+
+                // Pending winner requests
+                WinnerRequest.countDocuments({ status: 'pending' })
             ]);
 
             // Format stats
@@ -252,7 +257,8 @@ export const getDashboardStats = async (req, res) => {
                     activeRooms,
                     completedRooms,
                     totalTransactions,
-                    totalRevenue: totalRevenue[0]?.total || 0
+                    totalRevenue: totalRevenue[0]?.total || 0,
+                    pendingWinnerRequests
                 },
                 periodStats: {
                     today: formatPeriodStats(todayStats),
@@ -1596,6 +1602,309 @@ export const exportData = async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to export data'
+        });
+    }
+};
+
+// Winner Verification Management
+export const getWinnerRequests = async (req, res) => {
+    try {
+        const {
+            page = 1,
+            limit = 20,
+            status = 'all',
+            sortBy = 'createdAt',
+            sortOrder = 'desc'
+        } = req.query;
+
+        const { page: currentPage, limit: currentLimit, skip } = getPagination(page, limit);
+
+        // Build query
+        const query = {};
+        if (status !== 'all') {
+            query.status = status;
+        }
+
+        // Build sort
+        const sort = {};
+        sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
+
+        // Get winner requests
+        const [requests, total] = await Promise.all([
+            WinnerRequest.find(query)
+                .populate('gameRoomId', 'roomId gameType players')
+                .populate('declaredBy', 'name phone')
+                .populate('declaredWinner', 'name phone')
+                .populate('processedBy', 'username')
+                .sort(sort)
+                .skip(skip)
+                .limit(currentLimit)
+                .lean(),
+            WinnerRequest.countDocuments(query)
+        ]);
+
+        const result = buildPaginationResponse(requests, total, currentPage, currentLimit);
+
+        res.status(200).json({
+            success: true,
+            data: result
+        });
+
+    } catch (error) {
+        console.error('Get winner requests error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get winner requests'
+        });
+    }
+};
+
+export const getWinnerRequestDetails = async (req, res) => {
+    try {
+        const { requestId } = req.params;
+
+        const request = await WinnerRequest.findById(requestId)
+            .populate({
+                path: 'gameRoomId',
+                select: 'roomId gameType amount players createdAt startedAt',
+                populate: {
+                    path: 'players.userId',
+                    select: 'name phone'
+                }
+            })
+            .populate('declaredBy', 'name phone balance')
+            .populate('declaredWinner', 'name phone balance')
+            .populate('processedBy', 'username')
+            .lean();
+
+        if (!request) {
+            return res.status(404).json({
+                success: false,
+                message: 'Winner request not found'
+            });
+        }
+
+        // Get related transactions for this room
+        const roomTransactions = await Transaction.find({
+            gameRoomId: request.gameRoomId._id
+        })
+            .populate('userId', 'name phone')
+            .sort({ createdAt: -1 })
+            .lean();
+
+        res.status(200).json({
+            success: true,
+            data: {
+                request,
+                roomTransactions: roomTransactions.map(t => ({
+                    _id: t._id,
+                    type: t.type,
+                    amount: t.amount,
+                    description: t.description,
+                    status: t.status,
+                    user: t.userId,
+                    createdAt: t.createdAt
+                }))
+            }
+        });
+
+    } catch (error) {
+        console.error('Get winner request details error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get winner request details'
+        });
+    }
+};
+
+export const approveWinnerRequest = async (req, res) => {
+    try {
+        const { requestId } = req.params;
+        const { notes = '' } = req.body;
+        const adminId = req.admin._id;
+
+        const request = await WinnerRequest.findById(requestId)
+            .populate('gameRoomId')
+            .populate('declaredWinner', 'name');
+
+        if (!request) {
+            return res.status(404).json({
+                success: false,
+                message: 'Winner request not found'
+            });
+        }
+
+        if (request.status !== 'pending') {
+            return res.status(400).json({
+                success: false,
+                message: 'Request has already been processed'
+            });
+        }
+
+        const session = await mongoose.startSession();
+
+        try {
+            session.startTransaction();
+
+            // Award winnings to winner
+            await Transaction.createWithBalanceUpdate(
+                request.declaredWinner._id,
+                'game_win',
+                request.winnerAmount,
+                `Game Won - Room ${request.roomId} (Admin Verified)`,
+                {
+                    gameRoomId: request.gameRoomId._id,
+                    metadata: {
+                        roomCode: request.roomId,
+                        adminVerified: true,
+                        adminId: adminId,
+                        winnerRequestId: requestId,
+                        totalPlayers: request.gameRoomId.players.length,
+                        prizePool: request.totalPrizePool,
+                        platformFee: request.platformFee
+                    }
+                }
+            );
+
+            // Update winner's game stats
+            const winner = await User.findById(request.declaredWinner._id).session(session);
+            await winner.incrementGameStats(true, request.winnerAmount);
+
+            // Update other players' stats (losses)
+            for (const player of request.gameRoomId.players) {
+                if (player.userId.toString() !== request.declaredWinner._id.toString()) {
+                    const playerUser = await User.findById(player.userId).session(session);
+                    await playerUser.incrementGameStats(false, 0);
+                }
+            }
+
+            // Update room status to completed
+            const room = await GameRoom.findById(request.gameRoomId._id).session(session);
+            room.status = 'completed';
+            room.completedAt = new Date();
+            await room.save({ session });
+
+            // Update winner request
+            request.status = 'approved';
+            request.adminNotes = notes;
+            request.processedBy = adminId;
+            request.processedAt = new Date();
+            await request.save({ session });
+
+            await session.commitTransaction();
+
+            // Clear caches
+            cacheUtils.clearRoomsCache();
+            cacheUtils.clearUserCache(request.declaredWinner._id);
+            cache.del(cacheUtils.balanceKey(request.declaredWinner._id));
+
+            // Clear cache for all players
+            for (const player of request.gameRoomId.players) {
+                cacheUtils.clearUserCache(player.userId);
+            }
+
+            res.status(200).json({
+                success: true,
+                message: 'Winner request approved successfully',
+                data: {
+                    requestId,
+                    roomId: request.roomId,
+                    winner: {
+                        _id: request.declaredWinner._id,
+                        name: request.declaredWinner.name
+                    },
+                    winnerAmount: request.winnerAmount,
+                    approvedAt: new Date(),
+                    approvedBy: req.admin.username
+                }
+            });
+
+        } catch (error) {
+            await session.abortTransaction();
+            throw error;
+        } finally {
+            session.endSession();
+        }
+
+    } catch (error) {
+        console.error('Approve winner request error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to approve winner request'
+        });
+    }
+};
+
+export const rejectWinnerRequest = async (req, res) => {
+    try {
+        const { requestId } = req.params;
+        const { reason } = req.body;
+        const adminId = req.admin._id;
+
+        const request = await WinnerRequest.findById(requestId)
+            .populate('gameRoomId');
+
+        if (!request) {
+            return res.status(404).json({
+                success: false,
+                message: 'Winner request not found'
+            });
+        }
+
+        if (request.status !== 'pending') {
+            return res.status(400).json({
+                success: false,
+                message: 'Request has already been processed'
+            });
+        }
+
+        const session = await mongoose.startSession();
+
+        try {
+            session.startTransaction();
+
+            // Update room status back to playing
+            const room = await GameRoom.findById(request.gameRoomId._id).session(session);
+            room.status = 'playing';
+            room.winner = null;
+            await room.save({ session });
+
+            // Update winner request
+            request.status = 'rejected';
+            request.adminNotes = reason;
+            request.processedBy = adminId;
+            request.processedAt = new Date();
+            await request.save({ session });
+
+            await session.commitTransaction();
+
+            // Clear caches
+            cacheUtils.clearRoomsCache();
+
+            res.status(200).json({
+                success: true,
+                message: 'Winner request rejected successfully',
+                data: {
+                    requestId,
+                    roomId: request.roomId,
+                    reason,
+                    rejectedAt: new Date(),
+                    rejectedBy: req.admin.username
+                }
+            });
+
+        } catch (error) {
+            await session.abortTransaction();
+            throw error;
+        } finally {
+            session.endSession();
+        }
+
+    } catch (error) {
+        console.error('Reject winner request error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to reject winner request'
         });
     }
 };
