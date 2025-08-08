@@ -1053,7 +1053,14 @@ export const declareCorrectWinner = async (req, res) => {
             });
         }
 
-        const oldWinnerId = room.winner._id;
+        const oldWinnerId = room.winner ? room.winner._id : null;
+
+        if (!oldWinnerId) {
+            return res.status(400).json({
+                success: false,
+                message: 'No previous winner found for this room'
+            });
+        }
 
         if (oldWinnerId.toString() === winnerId.toString()) {
             return res.status(400).json({
@@ -1067,36 +1074,59 @@ export const declareCorrectWinner = async (req, res) => {
         try {
             session.startTransaction();
 
-            // Reverse the old winner's transaction
+            // Find the old winner's winning transaction
             const oldWinTransaction = await Transaction.findOne({
                 gameRoomId: room._id,
                 userId: oldWinnerId,
-                type: 'game_win'
-            });
+                type: 'game_win',
+                status: 'completed'
+            }).session(session);
 
             if (oldWinTransaction) {
-                // Deduct winnings from old winner
+                // Create reversal transaction for old winner
                 await Transaction.createWithBalanceUpdate(
                     oldWinnerId,
-                    'game_loss',
+                    'withdrawal',
                     room.winnerAmount,
-                    `Admin correction - Wrong winner declared for Room ${room.roomId}`,
+                    `Admin Correction - Reversed incorrect win for Room ${room.roomId}`,
                     {
                         gameRoomId: room._id,
+                        status: 'completed',
                         metadata: {
                             adminCorrection: true,
                             adminId: req.admin._id,
                             reason,
-                            originalTransactionId: oldWinTransaction._id
+                            originalTransactionId: oldWinTransaction._id,
+                            correctionType: 'winner_reversal'
                         }
                     }
                 );
 
                 // Update old winner's stats
-                const oldWinner = await User.findById(oldWinnerId);
-                oldWinner.totalWins = Math.max(0, oldWinner.totalWins - 1);
-                oldWinner.totalWinnings = Math.max(0, oldWinner.totalWinnings - room.winnerAmount);
-                await oldWinner.save({ session });
+                const oldWinner = await User.findById(oldWinnerId).session(session);
+                if (oldWinner) {
+                    oldWinner.totalWins = Math.max(0, oldWinner.totalWins - 1);
+                    oldWinner.totalWinnings = Math.max(0, oldWinner.totalWinnings - room.winnerAmount);
+                    await oldWinner.save({ session });
+                }
+            } else {
+                // If no winning transaction found, still deduct the amount
+                await Transaction.createWithBalanceUpdate(
+                    oldWinnerId,
+                    'withdrawal',
+                    room.winnerAmount,
+                    `Admin Correction - Deducted incorrect win amount for Room ${room.roomId}`,
+                    {
+                        gameRoomId: room._id,
+                        status: 'completed',
+                        metadata: {
+                            adminCorrection: true,
+                            adminId: req.admin._id,
+                            reason,
+                            correctionType: 'manual_deduction'
+                        }
+                    }
+                );
             }
 
             // Award winnings to correct winner
@@ -1104,23 +1134,27 @@ export const declareCorrectWinner = async (req, res) => {
                 winnerId,
                 'game_win',
                 room.winnerAmount,
-                `Admin correction - Correct winner for Room ${room.roomId}`,
+                `Admin Correction - Correct winner declared for Room ${room.roomId}`,
                 {
                     gameRoomId: room._id,
+                    status: 'completed',
                     metadata: {
                         adminCorrection: true,
                         adminId: req.admin._id,
                         reason,
-                        previousWinner: oldWinnerId
+                        previousWinner: oldWinnerId,
+                        correctionType: 'winner_declaration'
                     }
                 }
             );
 
             // Update new winner's stats
-            const newWinner = await User.findById(winnerId);
-            newWinner.totalWins += 1;
-            newWinner.totalWinnings += room.winnerAmount;
-            await newWinner.save({ session });
+            const newWinner = await User.findById(winnerId).session(session);
+            if (newWinner) {
+                newWinner.totalWins += 1;
+                newWinner.totalWinnings += room.winnerAmount;
+                await newWinner.save({ session });
+            }
 
             // Update room winner
             room.winner = winnerId;
@@ -1135,21 +1169,37 @@ export const declareCorrectWinner = async (req, res) => {
             cache.del(cacheUtils.balanceKey(oldWinnerId));
             cache.del(cacheUtils.balanceKey(winnerId));
 
+            // Get updated user details for response
+            const [oldWinnerDetails, newWinnerDetails] = await Promise.all([
+                User.findById(oldWinnerId).select('name balance'),
+                User.findById(winnerId).select('name balance')
+            ]);
+
             res.status(200).json({
                 success: true,
                 message: 'Winner corrected successfully',
                 data: {
                     roomId: room.roomId,
-                    previousWinner: oldWinnerId,
-                    newWinner: winnerId,
+                    previousWinner: {
+                        _id: oldWinnerId,
+                        name: oldWinnerDetails?.name,
+                        newBalance: oldWinnerDetails?.balance
+                    },
+                    newWinner: {
+                        _id: winnerId,
+                        name: newWinnerDetails?.name,
+                        newBalance: newWinnerDetails?.balance
+                    },
                     amount: room.winnerAmount,
                     reason,
-                    correctedAt: new Date()
+                    correctedAt: new Date(),
+                    correctedBy: req.admin.username
                 }
             });
 
         } catch (error) {
             await session.abortTransaction();
+            console.error('Transaction failed during winner correction:', error);
             throw error;
         } finally {
             session.endSession();
@@ -1159,7 +1209,7 @@ export const declareCorrectWinner = async (req, res) => {
         console.error('Declare correct winner error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to correct winner'
+            message: error.message || 'Failed to correct winner'
         });
     }
 };
