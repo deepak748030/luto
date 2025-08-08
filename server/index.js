@@ -14,10 +14,12 @@ import walletRoutes from './routes/wallet.js';
 import roomRoutes from './routes/rooms.js';
 import transactionRoutes from './routes/transactions.js';
 import dashboardRoutes from './routes/dashboard.js';
+import adminRoutes from './routes/admin.js';
 
 // Import middleware
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFoundHandler } from './middleware/notFoundHandler.js';
+import Admin from './models/Admin.js';
 
 dotenv.config();
 
@@ -65,8 +67,8 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs, {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    success: true, 
+  res.json({
+    success: true,
     message: 'LUDO LOOTO API is running!',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV,
@@ -86,6 +88,7 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/admin', adminRoutes);
 
 // 404 handler
 app.use(notFoundHandler);
@@ -97,7 +100,10 @@ app.use(errorHandler);
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');
-    
+
+    // Create default admin if not exists
+    Admin.createDefaultAdmin().catch(console.error);
+
     // Start server
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
