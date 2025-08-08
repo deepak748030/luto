@@ -1069,142 +1069,169 @@ export const declareCorrectWinner = async (req, res) => {
             });
         }
 
-        const session = await mongoose.startSession();
+        // Retry logic for handling write conflicts
+        const maxRetries = 3;
+        let retryCount = 0;
 
-        try {
-            session.startTransaction();
+        while (retryCount < maxRetries) {
+            const session = await mongoose.startSession();
 
-            // Find the old winner's winning transaction
-            const oldWinTransaction = await Transaction.findOne({
-                gameRoomId: room._id,
-                userId: oldWinnerId,
-                type: 'game_win',
-                status: 'completed'
-            }).session(session);
+            try {
+                await session.withTransaction(async () => {
+                    // Get fresh data within transaction to avoid conflicts
+                    const [currentRoom, oldWinner, newWinner] = await Promise.all([
+                        GameRoom.findOne({ roomId }).session(session),
+                        User.findById(oldWinnerId).session(session),
+                        User.findById(winnerId).session(session)
+                    ]);
 
-            if (oldWinTransaction) {
-                // Create reversal transaction for old winner
-                await Transaction.createWithBalanceUpdate(
-                    oldWinnerId,
-                    'withdrawal',
-                    room.winnerAmount,
-                    `Admin Correction - Reversed incorrect win for Room ${room.roomId}`,
-                    {
-                        gameRoomId: room._id,
-                        status: 'completed',
-                        metadata: {
-                            adminCorrection: true,
-                            adminId: req.admin._id,
-                            reason,
-                            originalTransactionId: oldWinTransaction._id,
-                            correctionType: 'winner_reversal'
-                        }
+                    if (!currentRoom || !oldWinner || !newWinner) {
+                        throw new Error('Required data not found');
                     }
-                );
 
-                // Update old winner's stats
-                const oldWinner = await User.findById(oldWinnerId).session(session);
-                if (oldWinner) {
+                    // Check old winner's current balance
+                    if (oldWinner.balance < room.winnerAmount) {
+                        throw new Error('Old winner has insufficient balance for correction');
+                    }
+
+                    // Step 1: Deduct amount from old winner
+                    oldWinner.balance -= room.winnerAmount;
                     oldWinner.totalWins = Math.max(0, oldWinner.totalWins - 1);
                     oldWinner.totalWinnings = Math.max(0, oldWinner.totalWinnings - room.winnerAmount);
-                    await oldWinner.save({ session });
-                }
-            } else {
-                // If no winning transaction found, still deduct the amount
-                await Transaction.createWithBalanceUpdate(
-                    oldWinnerId,
-                    'withdrawal',
-                    room.winnerAmount,
-                    `Admin Correction - Deducted incorrect win amount for Room ${room.roomId}`,
-                    {
-                        gameRoomId: room._id,
-                        status: 'completed',
-                        metadata: {
-                            adminCorrection: true,
-                            adminId: req.admin._id,
-                            reason,
-                            correctionType: 'manual_deduction'
+
+                    // Step 2: Add amount to new winner
+                    newWinner.balance += room.winnerAmount;
+                    newWinner.totalWins += 1;
+                    newWinner.totalWinnings += room.winnerAmount;
+
+                    // Step 3: Update room winner
+                    currentRoom.winner = winnerId;
+
+                    // Step 4: Save all changes
+                    await Promise.all([
+                        oldWinner.save({ session }),
+                        newWinner.save({ session }),
+                        currentRoom.save({ session })
+                    ]);
+
+                    // Step 5: Create transaction records
+                    const timestamp = new Date();
+                    const transactionData = [
+                        {
+                            userId: oldWinnerId,
+                            type: 'withdrawal',
+                            amount: room.winnerAmount,
+                            description: `Admin Correction - Reversed incorrect win for Room ${room.roomId}`,
+                            status: 'completed',
+                            gameRoomId: room._id,
+                            balanceBefore: oldWinner.balance + room.winnerAmount,
+                            balanceAfter: oldWinner.balance,
+                            transactionId: `TXN${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
+                            metadata: {
+                                adminCorrection: true,
+                                adminId: req.admin._id,
+                                reason,
+                                correctionType: 'winner_reversal'
+                            },
+                            createdAt: timestamp,
+                            updatedAt: timestamp
+                        },
+                        {
+                            userId: winnerId,
+                            type: 'game_win',
+                            amount: room.winnerAmount,
+                            description: `Admin Correction - Correct winner declared for Room ${room.roomId}`,
+                            status: 'completed',
+                            gameRoomId: room._id,
+                            balanceBefore: newWinner.balance - room.winnerAmount,
+                            balanceAfter: newWinner.balance,
+                            transactionId: `TXN${Date.now() + 1}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
+                            metadata: {
+                                adminCorrection: true,
+                                adminId: req.admin._id,
+                                reason,
+                                previousWinner: oldWinnerId,
+                                correctionType: 'winner_declaration'
+                            },
+                            createdAt: timestamp,
+                            updatedAt: timestamp
                         }
-                    }
-                );
-            }
+                    ];
 
-            // Award winnings to correct winner
-            await Transaction.createWithBalanceUpdate(
-                winnerId,
-                'game_win',
-                room.winnerAmount,
-                `Admin Correction - Correct winner declared for Room ${room.roomId}`,
-                {
-                    gameRoomId: room._id,
-                    status: 'completed',
-                    metadata: {
-                        adminCorrection: true,
-                        adminId: req.admin._id,
+                    await Transaction.insertMany(transactionData, { session });
+
+                    // Store final balances for response
+                    this.finalOldBalance = oldWinner.balance;
+                    this.finalNewBalance = newWinner.balance;
+                }, {
+                    readPreference: 'primary',
+                    readConcern: { level: 'majority' },
+                    writeConcern: { w: 'majority' }
+                });
+
+                // Transaction completed successfully
+                await session.endSession();
+
+                // Clear caches after successful transaction
+                cacheUtils.clearRoomsCache();
+                cacheUtils.clearUserCache(oldWinnerId);
+                cacheUtils.clearUserCache(winnerId);
+                cache.del(cacheUtils.balanceKey(oldWinnerId));
+                cache.del(cacheUtils.balanceKey(winnerId));
+
+                // Get updated user details for response
+                const [oldWinnerDetails, newWinnerDetails] = await Promise.all([
+                    User.findById(oldWinnerId).select('name balance'),
+                    User.findById(winnerId).select('name balance')
+                ]);
+
+                return res.status(200).json({
+                    success: true,
+                    message: 'Winner corrected successfully',
+                    data: {
+                        roomId: room.roomId,
+                        previousWinner: {
+                            _id: oldWinnerId,
+                            name: oldWinnerDetails?.name,
+                            newBalance: oldWinnerDetails?.balance
+                        },
+                        newWinner: {
+                            _id: winnerId,
+                            name: newWinnerDetails?.name,
+                            newBalance: newWinnerDetails?.balance
+                        },
+                        amount: room.winnerAmount,
                         reason,
-                        previousWinner: oldWinnerId,
-                        correctionType: 'winner_declaration'
+                        correctedAt: new Date(),
+                        correctedBy: req.admin.username
+                    }
+                });
+
+            } catch (error) {
+                await session.endSession();
+
+                // Check if it's a write conflict error
+                if (error.code === 112 || error.message.includes('Write conflict') || error.message.includes('WriteConflict')) {
+                    retryCount++;
+                    console.log(`Write conflict detected, retry ${retryCount}/${maxRetries}`);
+
+                    if (retryCount < maxRetries) {
+                        // Wait before retrying with exponential backoff
+                        await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 100));
+                        continue;
                     }
                 }
-            );
 
-            // Update new winner's stats
-            const newWinner = await User.findById(winnerId).session(session);
-            if (newWinner) {
-                newWinner.totalWins += 1;
-                newWinner.totalWinnings += room.winnerAmount;
-                await newWinner.save({ session });
+                console.error('Winner correction error:', error);
+                throw error;
             }
-
-            // Update room winner
-            room.winner = winnerId;
-            await room.save({ session });
-
-            await session.commitTransaction();
-
-            // Clear caches
-            cacheUtils.clearRoomsCache();
-            cacheUtils.clearUserCache(oldWinnerId);
-            cacheUtils.clearUserCache(winnerId);
-            cache.del(cacheUtils.balanceKey(oldWinnerId));
-            cache.del(cacheUtils.balanceKey(winnerId));
-
-            // Get updated user details for response
-            const [oldWinnerDetails, newWinnerDetails] = await Promise.all([
-                User.findById(oldWinnerId).select('name balance'),
-                User.findById(winnerId).select('name balance')
-            ]);
-
-            res.status(200).json({
-                success: true,
-                message: 'Winner corrected successfully',
-                data: {
-                    roomId: room.roomId,
-                    previousWinner: {
-                        _id: oldWinnerId,
-                        name: oldWinnerDetails?.name,
-                        newBalance: oldWinnerDetails?.balance
-                    },
-                    newWinner: {
-                        _id: winnerId,
-                        name: newWinnerDetails?.name,
-                        newBalance: newWinnerDetails?.balance
-                    },
-                    amount: room.winnerAmount,
-                    reason,
-                    correctedAt: new Date(),
-                    correctedBy: req.admin.username
-                }
-            });
-
-        } catch (error) {
-            await session.abortTransaction();
-            console.error('Transaction failed during winner correction:', error);
-            throw error;
-        } finally {
-            session.endSession();
         }
 
+        // If we reach here, all retries failed
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to correct winner after multiple attempts. Please try again.'
+        });
     } catch (error) {
         console.error('Declare correct winner error:', error);
         res.status(500).json({
