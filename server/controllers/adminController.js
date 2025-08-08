@@ -1072,6 +1072,8 @@ export const declareCorrectWinner = async (req, res) => {
         // Retry logic for handling write conflicts
         const maxRetries = 3;
         let retryCount = 0;
+        let finalOldBalance = 0;
+        let finalNewBalance = 0;
 
         while (retryCount < maxRetries) {
             const session = await mongoose.startSession();
@@ -1161,8 +1163,8 @@ export const declareCorrectWinner = async (req, res) => {
                     await Transaction.insertMany(transactionData, { session });
 
                     // Store final balances for response
-                    this.finalOldBalance = oldWinner.balance;
-                    this.finalNewBalance = newWinner.balance;
+                    finalOldBalance = oldWinner.balance;
+                    finalNewBalance = newWinner.balance;
                 }, {
                     readPreference: 'primary',
                     readConcern: { level: 'majority' },
