@@ -80,8 +80,13 @@ router.post('/signup', [
     .isLength({ min: 2, max: 50 })
     .withMessage('Name must be between 2 and 50 characters'),
   body('phone')
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Please enter a valid 10-digit phone number')
+    .custom((value) => {
+      const cleanPhone = value.replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone) && !/^91[6-9]\d{9}$/.test(cleanPhone)) {
+        throw new Error('Please enter a valid Indian mobile number');
+      }
+      return true;
+    })
 ], validateRequest, signup);
 
 /**
@@ -138,8 +143,13 @@ router.post('/signup', [
 // Verify OTP
 router.post('/verify-otp', [
   body('phone')
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Please enter a valid 10-digit phone number'),
+    .custom((value) => {
+      const cleanPhone = value.replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone) && !/^91[6-9]\d{9}$/.test(cleanPhone)) {
+        throw new Error('Please enter a valid Indian mobile number');
+      }
+      return true;
+    }),
   body('otp')
     .matches(/^\d{6}$/)
     .withMessage('OTP must be 6 digits'),
@@ -196,8 +206,13 @@ router.post('/verify-otp', [
 // Login
 router.post('/login', [
   body('phone')
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Please enter a valid 10-digit phone number'),
+    .custom((value) => {
+      const cleanPhone = value.replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone) && !/^91[6-9]\d{9}$/.test(cleanPhone)) {
+        throw new Error('Please enter a valid Indian mobile number');
+      }
+      return true;
+    }),
   body('password')
     .notEmpty()
     .withMessage('Password is required')
@@ -232,8 +247,13 @@ router.post('/login', [
 // Resend OTP
 router.post('/resend-otp', [
   body('phone')
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Please enter a valid 10-digit phone number')
+    .custom((value) => {
+      const cleanPhone = value.replace(/\D/g, '');
+      if (!/^[6-9]\d{9}$/.test(cleanPhone) && !/^91[6-9]\d{9}$/.test(cleanPhone)) {
+        throw new Error('Please enter a valid Indian mobile number');
+      }
+      return true;
+    })
 ], validateRequest, resendOtp);
 
 /**

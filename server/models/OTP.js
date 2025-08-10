@@ -5,17 +5,19 @@ const otpSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Phone number is required'],
     validate: {
-      validator: function(v) {
-        return /^[6-9]\d{9}$/.test(v);
+      validator: function (v) {
+        // Allow both 10-digit format and international format
+        const cleanPhone = v.replace(/\D/g, '');
+        return /^[6-9]\d{9}$/.test(cleanPhone) || /^91[6-9]\d{9}$/.test(cleanPhone);
       },
-      message: 'Please enter a valid 10-digit phone number'
+      message: 'Please enter a valid Indian mobile number'
     }
   },
   otp: {
     type: String,
     required: [true, 'OTP is required'],
     validate: {
-      validator: function(v) {
+      validator: function (v) {
         return /^\d{6}$/.test(v);
       },
       message: 'OTP must be 6 digits'
@@ -48,44 +50,44 @@ otpSchema.index({ phone: 1, isUsed: 1 });
 otpSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 // Method to verify OTP
-otpSchema.methods.verify = function(providedOtp) {
+otpSchema.methods.verify = function (providedOtp) {
   if (this.isUsed) {
     throw new Error('OTP has already been used');
   }
-  
+
   if (new Date() > this.expiresAt) {
     throw new Error('OTP has expired');
   }
-  
+
   if (this.attempts >= 3) {
     throw new Error('Maximum verification attempts exceeded');
   }
-  
+
   this.attempts += 1;
-  
+
   if (this.otp !== providedOtp) {
     throw new Error('Invalid OTP');
   }
-  
+
   this.isUsed = true;
   return true;
 };
 
 // Static method to generate and save OTP
-otpSchema.statics.generateAndSave = async function(phone, purpose = 'signup') {
+otpSchema.statics.generateAndSave = async function (phone, purpose = 'signup') {
   // Invalidate any existing unused OTPs for this phone
   await this.updateMany(
     { phone, isUsed: false },
     { isUsed: true }
   );
-  
+
   // Generate 6-digit OTP
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  
+
   // Set expiry time
   const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 5;
   const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
-  
+
   // Create and save OTP
   const otpDoc = new this({
     phone,
@@ -93,7 +95,7 @@ otpSchema.statics.generateAndSave = async function(phone, purpose = 'signup') {
     expiresAt,
     purpose
   });
-  
+
   await otpDoc.save();
   return otpDoc;
 };

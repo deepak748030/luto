@@ -1,12 +1,13 @@
 import User from '../models/User.js';
 import OTP from '../models/OTP.js';
 import { generateToken } from '../utils/jwt.js';
-import { sendOtpViaSMS } from '../utils/otpService.js';
+import { sendOtpViaSMS, validateIndianMobileNumber, verifyIndianPhoneNumber } from '../utils/otpService.js';
+import { normalizePhoneNumber } from '../utils/helpers.js';
 import { cache, cacheUtils } from '../utils/cache.js';
 
 export const signup = async (req, res) => {
   try {
-    const { name, phone } = req.body;
+    let { name, phone } = req.body;
 
     // Validate input
     if (!name || !phone) {
@@ -16,13 +17,18 @@ export const signup = async (req, res) => {
       });
     }
 
-    // Validate phone format (10 digits starting with 6-9)
-    if (!/^[6-9]\d{9}$/.test(phone)) {
+    // Validate Indian mobile number format
+    const phoneValidation = verifyIndianPhoneNumber(phone);
+    if (!phoneValidation.valid) {
       return res.status(400).json({
         success: false,
-        message: 'Please enter a valid 10-digit phone number'
+        message: phoneValidation.error,
+        expectedFormats: phoneValidation.expectedFormats
       });
     }
+
+    // Normalize phone number to 10-digit format for storage
+    phone = normalizePhoneNumber(phone);
 
     // Check if user already exists
     const existingUser = await User.findOne({ phone });
@@ -34,21 +40,17 @@ export const signup = async (req, res) => {
     }
 
     // Generate and save OTP (for production use)
-    let otpDoc;
-    if (process.env.NODE_ENV === 'development') {
-      console.log('🚀 Development mode: Skipping SMS, using dummy OTP');
-      // Create a dummy OTP for development
-      otpDoc = { otp: '123456' };
-    } else {
-      otpDoc = await OTP.generateAndSave(phone, 'signup');
+    const otpDoc = await OTP.generateAndSave(phone, 'signup');
 
-      // Send OTP via SMS
-      const smsResult = await sendOtpViaSMS(phone, otpDoc.otp);
+    // Send OTP via SMS
+    const smsResult = await sendOtpViaSMS(phone, otpDoc.otp);
 
-      if (!smsResult.status) {
-        console.error('Failed to send OTP:', smsResult.message);
-        // Still return success to prevent exposing SMS service issues
-      }
+    if (!smsResult.status) {
+      console.error('Failed to send OTP:', smsResult.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send OTP. Please try again.'
+      });
     }
 
     // Cache signup data temporarily
@@ -57,16 +59,11 @@ export const signup = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: process.env.NODE_ENV === 'development'
-        ? 'OTP bypassed for development (use any 6-digit number)'
-        : 'OTP sent successfully',
+      message: 'OTP sent successfully',
       data: {
         phone,
         otpSent: true,
-        expiresIn: '5 minutes',
-        ...(process.env.NODE_ENV === 'development' && {
-          devNote: 'Development mode: Use any 6-digit OTP'
-        })
+        expiresIn: '5 minutes'
       }
     });
 
@@ -81,7 +78,7 @@ export const signup = async (req, res) => {
 
 export const verifyOtp = async (req, res) => {
   try {
-    const { phone, otp, password } = req.body;
+    let { phone, otp, password } = req.body;
 
     // Validate input
     if (!phone || !otp || !password) {
@@ -90,6 +87,9 @@ export const verifyOtp = async (req, res) => {
         message: 'Phone, OTP, and password are required'
       });
     }
+
+    // Normalize phone number
+    phone = normalizePhoneNumber(phone);
 
     // Validate password length
     if (password.length < 6) {
@@ -108,35 +108,29 @@ export const verifyOtp = async (req, res) => {
       });
     }
 
-    // DEVELOPMENT: Bypass OTP verification - accept any 6-digit OTP
-    if (process.env.NODE_ENV === 'development') {
-      console.log('🚀 Development mode: Bypassing OTP verification');
-      console.log(`📱 Phone: ${phone}, OTP: ${otp} (accepted)`);
-    } else {
-      // Production OTP verification
-      const otpDoc = await OTP.findOne({
-        phone,
-        isUsed: false,
-        expiresAt: { $gt: new Date() }
-      }).sort({ createdAt: -1 });
+    // Find and verify OTP
+    const otpDoc = await OTP.findOne({
+      phone,
+      isUsed: false,
+      expiresAt: { $gt: new Date() }
+    }).sort({ createdAt: -1 });
 
-      if (!otpDoc) {
-        return res.status(400).json({
-          success: false,
-          message: 'OTP expired or not found'
-        });
-      }
+    if (!otpDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP expired or not found'
+      });
+    }
 
-      // Verify OTP
-      try {
-        otpDoc.verify(otp);
-        await otpDoc.save();
-      } catch (otpError) {
-        return res.status(400).json({
-          success: false,
-          message: otpError.message
-        });
-      }
+    // Verify OTP
+    try {
+      otpDoc.verify(otp);
+      await otpDoc.save();
+    } catch (otpError) {
+      return res.status(400).json({
+        success: false,
+        message: otpError.message
+      });
     }
 
     // Create new user
@@ -184,7 +178,7 @@ export const verifyOtp = async (req, res) => {
 
 export const login = async (req, res) => {
   try {
-    const { phone, password } = req.body;
+    let { phone, password } = req.body;
 
     // Validate input
     if (!phone || !password) {
@@ -193,6 +187,9 @@ export const login = async (req, res) => {
         message: 'Phone and password are required'
       });
     }
+
+    // Normalize phone number
+    phone = normalizePhoneNumber(phone);
 
     // Find user by phone
     const user = await User.findOne({ phone, isActive: true });
@@ -252,7 +249,7 @@ export const login = async (req, res) => {
 
 export const resendOtp = async (req, res) => {
   try {
-    const { phone } = req.body;
+    let { phone } = req.body;
 
     if (!phone) {
       return res.status(400).json({
@@ -260,6 +257,17 @@ export const resendOtp = async (req, res) => {
         message: 'Phone number is required'
       });
     }
+
+    // Validate and normalize phone number
+    const phoneValidation = verifyIndianPhoneNumber(phone);
+    if (!phoneValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: phoneValidation.error
+      });
+    }
+
+    phone = normalizePhoneNumber(phone);
 
     // Check if signup data exists in cache
     const signupData = cache.get(`signup_${phone}`);
@@ -271,13 +279,26 @@ export const resendOtp = async (req, res) => {
     }
 
     // Generate and save new OTP
-    const otpDoc = await OTP.generateAndSave(phone, 'signup');
+    let otpDoc;
+    try {
+      otpDoc = await OTP.generateAndSave(phone, 'signup');
+    } catch (error) {
+      console.error('Failed to generate OTP:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to generate OTP. Please try again.'
+      });
+    }
 
     // Send OTP via SMS
     const smsResult = await sendOtpViaSMS(phone, otpDoc.otp);
 
     if (!smsResult.status) {
       console.error('Failed to resend OTP:', smsResult.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send OTP. Please try again.'
+      });
     }
 
     res.status(200).json({

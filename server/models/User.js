@@ -12,11 +12,14 @@ const userSchema = new mongoose.Schema({
   phone: {
     type: String,
     required: [true, 'Phone number is required'],
+    // unique: true,
     validate: {
-      validator: function(v) {
-        return /^[6-9]\d{9}$/.test(v);
+      validator: function (v) {
+        // Allow both 10-digit format and international format
+        const cleanPhone = v.replace(/\D/g, '');
+        return /^[6-9]\d{9}$/.test(cleanPhone) || /^91[6-9]\d{9}$/.test(cleanPhone);
       },
-      message: 'Please enter a valid 10-digit phone number'
+      message: 'Please enter a valid Indian mobile number (10 digits starting with 6-9)'
     }
   },
   password: {
@@ -59,7 +62,7 @@ const userSchema = new mongoose.Schema({
 }, {
   timestamps: true,
   toJSON: {
-    transform: function(doc, ret) {
+    transform: function (doc, ret) {
       delete ret.password;
       return ret;
     }
@@ -72,15 +75,15 @@ userSchema.index({ createdAt: -1 });
 userSchema.index({ isActive: 1 });
 
 // Virtual for win rate
-userSchema.virtual('winRate').get(function() {
+userSchema.virtual('winRate').get(function () {
   if (this.totalGames === 0) return 0;
   return Math.round((this.totalWins / this.totalGames) * 100);
 });
 
 // Pre-save middleware to hash password
-userSchema.pre('save', async function(next) {
+userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
-  
+
   try {
     const salt = await bcrypt.genSalt(12);
     this.password = await bcrypt.hash(this.password, salt);
@@ -91,12 +94,12 @@ userSchema.pre('save', async function(next) {
 });
 
 // Method to compare password
-userSchema.methods.comparePassword = async function(candidatePassword) {
+userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
 // Method to increment game stats
-userSchema.methods.incrementGameStats = async function(won = false, winAmount = 0) {
+userSchema.methods.incrementGameStats = async function (won = false, winAmount = 0) {
   this.totalGames += 1;
   if (won) {
     this.totalWins += 1;
@@ -106,7 +109,7 @@ userSchema.methods.incrementGameStats = async function(won = false, winAmount = 
 };
 
 // Method to update balance
-userSchema.methods.updateBalance = async function(amount, description) {
+userSchema.methods.updateBalance = async function (amount, description) {
   const newBalance = this.balance + amount;
   if (newBalance < 0) {
     throw new Error('Insufficient balance');
