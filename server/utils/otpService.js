@@ -2,6 +2,13 @@ import twilio from 'twilio';
 import dotenv from 'dotenv'
 dotenv.config();
 
+
+console.log({
+    "accountssid": process.env.TWILIO_ACCOUNT_SID,
+    "authtoken": process.env.TWILIO_AUTH_TOKEN,
+    "phone": process.env.TWILIO_PHONE_NUMBER,
+    "apikey": process.env.TWILIO_API_KEY
+});
 // Initialize Twilio client with better error handling
 let client;
 try {
