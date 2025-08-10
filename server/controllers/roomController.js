@@ -24,6 +24,9 @@ export const getRooms = async (req, res) => {
         query.status = status;
       }
 
+      // Only show rooms where winner is not declared (winner field is null)
+      query.winner = null;
+
       // Get rooms
       const [rooms, total] = await Promise.all([
         GameRoom.find(query)
