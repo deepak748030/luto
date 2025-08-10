@@ -5,6 +5,8 @@ import { auth } from '../middleware/auth.js';
 import {
   signup,
   verifyOtp,
+  sendOtp,
+  verifyOtpLogin,
   login,
   resendOtp,
   logout

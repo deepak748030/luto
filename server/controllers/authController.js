@@ -7,13 +7,13 @@ import { cache, cacheUtils } from '../utils/cache.js';
 
 export const signup = async (req, res) => {
   try {
-    let { name, phone } = req.body;
+    let { phone } = req.body;
 
     // Validate input
-    if (!name || !phone) {
+    if (!phone) {
       return res.status(400).json({
         success: false,
-        message: 'Name and phone number are required'
+        message: 'Phone number is required'
       });
     }
 
@@ -54,7 +54,7 @@ export const signup = async (req, res) => {
     }
 
     // Cache signup data temporarily
-    const signupData = { name, phone };
+    const signupData = { phone };
     cache.set(`signup_${phone}`, signupData, 600); // 10 minutes
 
     res.status(200).json({
@@ -78,13 +78,13 @@ export const signup = async (req, res) => {
 
 export const verifyOtp = async (req, res) => {
   try {
-    let { phone, otp, password } = req.body;
+    let { phone, otp, name, password } = req.body;
 
     // Validate input
-    if (!phone || !otp || !password) {
+    if (!phone || !otp || !name || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Phone, OTP, and password are required'
+        message: 'Phone, OTP, name, and password are required'
       });
     }
 
@@ -135,7 +135,7 @@ export const verifyOtp = async (req, res) => {
 
     // Create new user
     const user = new User({
-      name: signupData.name,
+      name: name.trim(),
       phone,
       password,
       isVerified: true
@@ -172,6 +172,151 @@ export const verifyOtp = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to verify OTP and create account'
+    });
+  }
+};
+
+export const sendOtp = async (req, res) => {
+  try {
+    let { phone } = req.body;
+
+    // Validate input
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number is required'
+      });
+    }
+
+    // Validate Indian mobile number format
+    const phoneValidation = verifyIndianPhoneNumber(phone);
+    if (!phoneValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: phoneValidation.error,
+        expectedFormats: phoneValidation.expectedFormats
+      });
+    }
+
+    // Normalize phone number to 10-digit format for storage
+    phone = normalizePhoneNumber(phone);
+
+    // Generate and save OTP
+    const otpDoc = await OTP.generateAndSave(phone, 'login');
+
+    // Send OTP via SMS
+    const smsResult = await sendOtpViaSMS(phone, otpDoc.otp);
+
+    if (!smsResult.status) {
+      console.error('Failed to send OTP:', smsResult.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send OTP. Please try again.'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'OTP sent successfully',
+      data: {
+        phone,
+        otpSent: true,
+        expiresIn: '5 minutes'
+      }
+    });
+
+  } catch (error) {
+    console.error('Send OTP error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send OTP'
+    });
+  }
+};
+
+export const verifyOtpLogin = async (req, res) => {
+  try {
+    let { phone, otp } = req.body;
+
+    // Validate input
+    if (!phone || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone and OTP are required'
+      });
+    }
+
+    // Normalize phone number
+    phone = normalizePhoneNumber(phone);
+
+    // Find and verify OTP
+    const otpDoc = await OTP.findOne({
+      phone,
+      isUsed: false,
+      expiresAt: { $gt: new Date() }
+    }).sort({ createdAt: -1 });
+
+    if (!otpDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'OTP expired or not found'
+      });
+    }
+
+    // Verify OTP
+    try {
+      otpDoc.verify(otp);
+      await otpDoc.save();
+    } catch (otpError) {
+      return res.status(400).json({
+        success: false,
+        message: otpError.message
+      });
+    }
+
+    // Find user by phone
+    const user = await User.findOne({ phone, isActive: true });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found. Please register first.'
+      });
+    }
+
+    // Update last login
+    user.lastLogin = new Date();
+    await user.save();
+
+    // Generate JWT token
+    const token = generateToken(user._id);
+
+    // Cache user data
+    cache.set(cacheUtils.userKey(user._id), user, 300);
+
+    res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        user: {
+          _id: user._id,
+          name: user.name,
+          phone: user.phone,
+          balance: user.balance,
+          totalGames: user.totalGames,
+          totalWins: user.totalWins,
+          totalWinnings: user.totalWinnings,
+          winRate: user.winRate,
+          isVerified: user.isVerified
+        },
+        token
+      }
+    });
+
+  } catch (error) {
+    console.error('OTP login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to verify OTP and login'
     });
   }
 };

@@ -60,13 +60,11 @@ Content-Type: application/json
 **Request Body**:
 ```json
 {
-  "name": "John Doe",
   "phone": "9876543210"
 }
 ```
 
 **Request Validation**:
-- `name`: Required, 2-50 characters
 - `phone`: Required, 10-digit number starting with 6-9
 
 **Success Response** (200):
@@ -130,6 +128,7 @@ Content-Type: application/json
 {
   "phone": "9876543210",
   "otp": "123456",
+  "name": "John Doe",
   "password": "password123"
 }
 ```
@@ -137,6 +136,7 @@ Content-Type: application/json
 **Request Validation**:
 - `phone`: Required, 10-digit number starting with 6-9
 - `otp`: Required, 6-digit number
+- `name`: Required, 2-50 characters
 - `password`: Required, minimum 6 characters
 
 **Success Response** (201):
@@ -183,11 +183,126 @@ Content-Type: application/json
 }
 ```
 
-#### 1.3 User Login
+#### 1.3 Send OTP for Login
+
+**Endpoint**: `POST /api/auth/send-otp`
+
+**Description**: Send OTP to existing user for login
+
+**Headers**:
+```
+Content-Type: application/json
+```
+
+**Request Body**:
+```json
+{
+  "phone": "9876543210"
+}
+```
+
+**Request Validation**:
+- `phone`: Required, 10-digit number starting with 6-9
+
+**Success Response** (200):
+```json
+{
+  "success": true,
+  "message": "OTP sent successfully",
+  "data": {
+    "phone": "9876543210",
+    "otpSent": true,
+    "expiresIn": "5 minutes"
+  }
+}
+```
+
+**Error Responses**:
+
+*Invalid Phone Number (400)*:
+```json
+{
+  "success": false,
+  "message": "Please enter a valid Indian mobile number"
+}
+```
+
+*OTP Sending Failed (500)*:
+```json
+{
+  "success": false,
+  "message": "Failed to send OTP. Please try again."
+}
+```
+
+#### 1.4 Verify OTP for Login
+
+**Endpoint**: `POST /api/auth/verify-otp-login`
+
+**Description**: Verify OTP and login existing user
+
+**Headers**:
+```
+Content-Type: application/json
+```
+
+**Request Body**:
+```json
+{
+  "phone": "9876543210",
+  "otp": "123456"
+}
+```
+
+**Request Validation**:
+- `phone`: Required, 10-digit number starting with 6-9
+- `otp`: Required, 6-digit number
+
+**Success Response** (200):
+```json
+{
+  "success": true,
+  "message": "Login successful",
+  "data": {
+    "user": {
+      "_id": "60d5ecb74b24a1234567890a",
+      "name": "John Doe",
+      "phone": "9876543210",
+      "balance": 1500.50,
+      "totalGames": 25,
+      "totalWins": 15,
+      "totalWinnings": 5000,
+      "winRate": 60,
+      "isVerified": true
+    },
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
+}
+```
+
+**Error Responses**:
+
+*Invalid OTP (400)*:
+```json
+{
+  "success": false,
+  "message": "Invalid OTP"
+}
+```
+
+*User Not Found (404)*:
+```json
+{
+  "success": false,
+  "message": "User not found. Please register first."
+}
+```
+
+#### 1.5 User Login (Password-based)
 
 **Endpoint**: `POST /api/auth/login`
 
-**Description**: Login existing user
+**Description**: Login existing user with password
 
 **Headers**:
 ```
@@ -234,7 +349,7 @@ Content-Type: application/json
 }
 ```
 
-#### 1.4 Resend OTP
+#### 1.6 Resend OTP
 
 **Endpoint**: `POST /api/auth/resend-otp`
 
@@ -257,7 +372,7 @@ Content-Type: application/json
 }
 ```
 
-#### 1.5 Logout
+#### 1.7 Logout
 
 **Endpoint**: `POST /api/auth/logout`
 
@@ -1081,22 +1196,22 @@ const setAuthToken = (token) => {
 ### 2. Authentication Flow
 
 ```javascript
-// Step 1: Signup
-const signup = async (name, phone) => {
+// Step 1: Signup (only phone number needed)
+const signup = async (phone) => {
   const response = await fetch(`${API_BASE_URL}/api/auth/signup`, {
     method: 'POST',
     headers: apiClient.headers,
-    body: JSON.stringify({ name, phone })
+    body: JSON.stringify({ phone })
   });
   return response.json();
 };
 
-// Step 2: Verify OTP
-const verifyOtp = async (phone, otp, password) => {
+// Step 2: Verify OTP and complete registration
+const verifyOtp = async (phone, otp, name, password) => {
   const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     headers: apiClient.headers,
-    body: JSON.stringify({ phone, otp, password })
+    body: JSON.stringify({ phone, otp, name, password })
   });
   const data = await response.json();
   
@@ -1109,7 +1224,34 @@ const verifyOtp = async (phone, otp, password) => {
   return data;
 };
 
-// Step 3: Login
+// Step 3: Send OTP for Login
+const sendOtpForLogin = async (phone) => {
+  const response = await fetch(`${API_BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    headers: apiClient.headers,
+    body: JSON.stringify({ phone })
+  });
+  return response.json();
+};
+
+// Step 4: Verify OTP and Login
+const verifyOtpLogin = async (phone, otp) => {
+  const response = await fetch(`${API_BASE_URL}/api/auth/verify-otp-login`, {
+    method: 'POST',
+    headers: apiClient.headers,
+    body: JSON.stringify({ phone, otp })
+  });
+  const data = await response.json();
+  
+  if (data.success) {
+    localStorage.setItem('authToken', data.data.token);
+    setAuthToken(data.data.token);
+  }
+  
+  return data;
+};
+
+// Step 5: Password-based Login (Alternative)
 const login = async (phone, password) => {
   const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
     method: 'POST',
@@ -1296,7 +1438,12 @@ curl http://localhost:5000/health
 # Signup
 curl -X POST http://localhost:5000/api/auth/signup \
   -H "Content-Type: application/json" \
-  -d '{"name":"John Doe","phone":"9876543210"}'
+  -d '{"phone":"9876543210"}'
+
+# Send OTP for login
+curl -X POST http://localhost:5000/api/auth/send-otp \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"9876543210"}'
 
 # Login
 curl -X POST http://localhost:5000/api/auth/login \
