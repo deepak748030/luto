@@ -3,7 +3,8 @@ import User from '../models/User.js';
 import GameRoom from '../models/GameRoom.js';
 import Transaction from '../models/Transaction.js';
 import WinnerRequest from '../models/WinnerRequest.js';
-import jwt from 'jsonwebtoken';
+import WithdrawalRequest from '../models/WithdrawalRequest.js';
+import { generateToken } from '../utils/jwt.js';
 import { cache, cacheUtils } from '../utils/cache.js';
 import { getPagination, buildPaginationResponse } from '../utils/helpers.js';
 import mongoose from 'mongoose';
@@ -18,7 +19,7 @@ export const adminLogin = async (req, res) => {
         if (!admin) {
             return res.status(401).json({
                 success: false,
-                message: 'Invalid username or password'
+                message: 'Invalid credentials'
             });
         }
 
@@ -36,7 +37,7 @@ export const adminLogin = async (req, res) => {
             await admin.incLoginAttempts();
             return res.status(401).json({
                 success: false,
-                message: 'Invalid username or password'
+                message: 'Invalid credentials'
             });
         }
 
@@ -50,11 +51,7 @@ export const adminLogin = async (req, res) => {
         await admin.save();
 
         // Generate JWT token
-        const token = jwt.sign(
-            { adminId: admin._id, role: admin.role },
-            process.env.JWT_SECRET,
-            { expiresIn: '8h' } // Admin sessions expire in 8 hours
-        );
+        const token = generateToken(admin._id, 'admin');
 
         res.status(200).json({
             success: true,
@@ -64,8 +61,7 @@ export const adminLogin = async (req, res) => {
                     _id: admin._id,
                     username: admin.username,
                     role: admin.role,
-                    permissions: admin.permissions,
-                    lastLogin: admin.lastLogin
+                    permissions: admin.permissions
                 },
                 token
             }
@@ -82,7 +78,6 @@ export const adminLogin = async (req, res) => {
 
 export const adminLogout = async (req, res) => {
     try {
-        // In a more sophisticated setup, you might want to blacklist the token
         res.status(200).json({
             success: true,
             message: 'Logged out successfully'
@@ -147,137 +142,95 @@ export const getDashboardStats = async (req, res) => {
             // Get current date ranges
             const today = new Date();
             const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-            const startOfWeek = new Date(today.setDate(today.getDate() - today.getDay()));
             const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+            const startOfYear = new Date(today.getFullYear(), 0, 1);
 
-            // Parallel queries for better performance
+            // Get basic counts
             const [
                 totalUsers,
                 activeUsers,
-                blockedUsers,
                 totalRooms,
                 activeRooms,
-                completedRooms,
-                totalTransactions,
-                totalRevenue,
-                todayStats,
-                weekStats,
-                monthStats,
-                recentUsers,
-                recentTransactions,
-                topWinners,
+                pendingWithdrawals,
                 pendingWinnerRequests
             ] = await Promise.all([
-                // User stats
                 User.countDocuments({ isActive: true }),
-                User.countDocuments({ isActive: true, lastLogin: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } }),
-                User.countDocuments({ isActive: false }),
-
-                // Room stats
+                User.countDocuments({
+                    isActive: true,
+                    lastLogin: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
+                }),
                 GameRoom.countDocuments(),
                 GameRoom.countDocuments({ status: { $in: ['waiting', 'playing'] } }),
-                GameRoom.countDocuments({ status: 'completed' }),
-
-                // Transaction stats
-                Transaction.countDocuments({ status: 'completed' }),
-                Transaction.aggregate([
-                    { $match: { type: 'game_loss', status: 'completed' } },
-                    { $group: { _id: null, total: { $sum: '$amount' } } }
-                ]),
-
-                // Today's stats
-                Transaction.aggregate([
-                    { $match: { createdAt: { $gte: startOfToday }, status: 'completed' } },
-                    { $group: { _id: '$type', count: { $sum: 1 }, amount: { $sum: '$amount' } } }
-                ]),
-
-                // This week's stats
-                Transaction.aggregate([
-                    { $match: { createdAt: { $gte: startOfWeek }, status: 'completed' } },
-                    { $group: { _id: '$type', count: { $sum: 1 }, amount: { $sum: '$amount' } } }
-                ]),
-
-                // This month's stats
-                Transaction.aggregate([
-                    { $match: { createdAt: { $gte: startOfMonth }, status: 'completed' } },
-                    { $group: { _id: '$type', count: { $sum: 1 }, amount: { $sum: '$amount' } } }
-                ]),
-
-                // Recent users
-                User.find({ isActive: true })
-                    .sort({ createdAt: -1 })
-                    .limit(5)
-                    .select('name phone balance createdAt')
-                    .lean(),
-
-                // Recent transactions
-                Transaction.find({ status: 'completed' })
-                    .populate('userId', 'name phone')
-                    .sort({ createdAt: -1 })
-                    .limit(10)
-                    .lean(),
-
-                // Top winners
-                User.find({ isActive: true })
-                    .sort({ totalWinnings: -1 })
-                    .limit(5)
-                    .select('name phone totalWinnings totalWins totalGames')
-                    .lean(),
-
-                // Pending winner requests
+                WithdrawalRequest.countDocuments({ status: 'pending' }),
                 WinnerRequest.countDocuments({ status: 'pending' })
             ]);
 
-            // Format stats
-            const formatPeriodStats = (stats) => {
-                const result = { deposits: 0, withdrawals: 0, gameRevenue: 0, transactions: 0 };
-                stats.forEach(stat => {
-                    result.transactions += stat.count;
-                    switch (stat._id) {
-                        case 'deposit':
-                            result.deposits = stat.amount;
-                            break;
-                        case 'withdrawal':
-                            result.withdrawals = stat.amount;
-                            break;
-                        case 'game_loss':
-                            result.gameRevenue = stat.amount;
-                            break;
+            // Get transaction stats
+            const transactionStats = await Transaction.aggregate([
+                {
+                    $match: {
+                        status: 'completed',
+                        createdAt: { $gte: startOfMonth }
                     }
-                });
-                return result;
+                },
+                {
+                    $group: {
+                        _id: '$type',
+                        total: { $sum: '$amount' },
+                        count: { $sum: 1 }
+                    }
+                }
+            ]);
+
+            // Format transaction stats
+            const monthlyStats = {
+                deposits: 0,
+                withdrawals: 0,
+                gameRevenue: 0,
+                totalTransactions: 0
             };
+
+            transactionStats.forEach(stat => {
+                monthlyStats.totalTransactions += stat.count;
+                switch (stat._id) {
+                    case 'deposit':
+                        monthlyStats.deposits = stat.total;
+                        break;
+                    case 'withdrawal':
+                        monthlyStats.withdrawals = stat.total;
+                        break;
+                    case 'game_loss':
+                        // Platform fee from game losses (10% of total game amount)
+                        monthlyStats.gameRevenue += Math.floor(stat.total * 0.1);
+                        break;
+                }
+            });
+
+            // Get recent activities
+            const recentTransactions = await Transaction.find({
+                status: 'completed'
+            })
+                .populate('userId', 'name phone')
+                .sort({ createdAt: -1 })
+                .limit(10)
+                .lean();
 
             cachedStats = {
                 overview: {
                     totalUsers,
                     activeUsers,
-                    blockedUsers,
                     totalRooms,
                     activeRooms,
-                    completedRooms,
-                    totalTransactions,
-                    totalRevenue: totalRevenue[0]?.total || 0,
+                    pendingWithdrawals,
                     pendingWinnerRequests
                 },
-                periodStats: {
-                    today: formatPeriodStats(todayStats),
-                    thisWeek: formatPeriodStats(weekStats),
-                    thisMonth: formatPeriodStats(monthStats)
-                },
-                recentActivity: {
-                    users: recentUsers,
-                    transactions: recentTransactions.map(t => ({
-                        _id: t._id,
-                        type: t.type,
-                        amount: t.amount,
-                        user: t.userId,
-                        createdAt: t.createdAt
-                    }))
-                },
-                topWinners: topWinners.map(user => ({
-                    ...user,
-                    winRate: user.totalGames > 0 ? Math.round((user.totalWins / user.totalGames) * 100) : 0
+                monthlyStats,
+                recentTransactions: recentTransactions.map(t => ({
+                    _id: t._id,
+                    type: t.type,
+                    amount: t.amount,
+                    user: t.userId,
+                    createdAt: t.createdAt
                 }))
             };
 
@@ -291,7 +244,7 @@ export const getDashboardStats = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Get dashboard stats error:', error);
+        console.error('Get admin dashboard stats error:', error);
         res.status(500).json({
             success: false,
             message: 'Failed to get dashboard statistics'
@@ -299,187 +252,189 @@ export const getDashboardStats = async (req, res) => {
     }
 };
 
-export const getSystemStats = async (req, res) => {
+// Withdrawal Management
+export const getWithdrawalRequests = async (req, res) => {
     try {
-        const cacheKey = 'admin_system_stats';
-        let cachedStats = cache.get(cacheKey);
+        const { status = 'all', page = 1, limit = 20, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
 
-        if (!cachedStats) {
-            // Get system performance stats
-            const [
-                dbStats,
-                cacheStats,
-                errorLogs
-            ] = await Promise.all([
-                // Database stats
-                mongoose.connection.db.stats(),
+        const { page: currentPage, limit: currentLimit, skip } = getPagination(page, limit);
 
-                // Cache stats
-                cache.getStats(),
-
-                // Recent error logs (you might want to implement error logging)
-                Promise.resolve([])
-            ]);
-
-            cachedStats = {
-                database: {
-                    collections: dbStats.collections,
-                    dataSize: Math.round(dbStats.dataSize / 1024 / 1024), // MB
-                    indexSize: Math.round(dbStats.indexSize / 1024 / 1024), // MB
-                    totalSize: Math.round(dbStats.storageSize / 1024 / 1024) // MB
-                },
-                cache: {
-                    keys: cacheStats.keys,
-                    hits: cacheStats.hits,
-                    misses: cacheStats.misses,
-                    hitRate: cacheStats.hits > 0 ? Math.round((cacheStats.hits / (cacheStats.hits + cacheStats.misses)) * 100) : 0
-                },
-                server: {
-                    uptime: process.uptime(),
-                    memoryUsage: process.memoryUsage(),
-                    nodeVersion: process.version,
-                    environment: process.env.NODE_ENV
-                }
-            };
-
-            // Cache for 10 minutes
-            cache.set(cacheKey, cachedStats, 600);
+        // Build query
+        const query = {};
+        if (status !== 'all') {
+            query.status = status;
         }
+
+        // Build sort
+        const sort = {};
+        sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
+
+        // Get withdrawal requests
+        const [withdrawalRequests, total] = await Promise.all([
+            WithdrawalRequest.find(query)
+                .populate('userId', 'name phone balance')
+                .populate('processedBy', 'username')
+                .sort(sort)
+                .skip(skip)
+                .limit(currentLimit)
+                .lean(),
+            WithdrawalRequest.countDocuments(query)
+        ]);
+
+        const result = buildPaginationResponse(
+            withdrawalRequests,
+            total,
+            currentPage,
+            currentLimit
+        );
 
         res.status(200).json({
             success: true,
-            data: cachedStats
+            data: result
         });
 
     } catch (error) {
-        console.error('Get system stats error:', error);
+        console.error('Get withdrawal requests error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to get system statistics'
+            message: 'Failed to get withdrawal requests'
         });
     }
 };
 
-export const getRevenueStats = async (req, res) => {
+export const getWithdrawalRequestDetails = async (req, res) => {
     try {
-        const { period = '30d' } = req.query;
+        const { requestId } = req.params;
 
-        // Calculate date range
-        let startDate = new Date();
-        switch (period) {
-            case '7d':
-                startDate.setDate(startDate.getDate() - 7);
-                break;
-            case '30d':
-                startDate.setDate(startDate.getDate() - 30);
-                break;
-            case '90d':
-                startDate.setDate(startDate.getDate() - 90);
-                break;
-            case '1y':
-                startDate.setFullYear(startDate.getFullYear() - 1);
-                break;
-            default:
-                startDate.setDate(startDate.getDate() - 30);
-        }
+        const withdrawalRequest = await WithdrawalRequest.findById(requestId)
+            .populate('userId', 'name phone balance totalGames totalWins')
+            .populate('transactionId')
+            .populate('processedBy', 'username');
 
-        const cacheKey = `admin_revenue_stats_${period}`;
-        let cachedStats = cache.get(cacheKey);
-
-        if (!cachedStats) {
-            // Revenue analytics
-            const revenueData = await Transaction.aggregate([
-                {
-                    $match: {
-                        createdAt: { $gte: startDate },
-                        status: 'completed'
-                    }
-                },
-                {
-                    $group: {
-                        _id: {
-                            type: '$type',
-                            date: {
-                                $dateToString: {
-                                    format: '%Y-%m-%d',
-                                    date: '$createdAt'
-                                }
-                            }
-                        },
-                        amount: { $sum: '$amount' },
-                        count: { $sum: 1 }
-                    }
-                },
-                {
-                    $group: {
-                        _id: '$_id.type',
-                        totalAmount: { $sum: '$amount' },
-                        totalCount: { $sum: '$count' },
-                        dailyData: {
-                            $push: {
-                                date: '$_id.date',
-                                amount: '$amount',
-                                count: '$count'
-                            }
-                        }
-                    }
-                }
-            ]);
-
-            // Platform fee calculation (from game losses)
-            const platformRevenue = await GameRoom.aggregate([
-                {
-                    $match: {
-                        status: 'completed',
-                        completedAt: { $gte: startDate }
-                    }
-                },
-                {
-                    $group: {
-                        _id: null,
-                        totalPlatformFee: { $sum: '$platformFee' },
-                        totalGames: { $sum: 1 },
-                        totalPrizePool: { $sum: '$totalPrizePool' }
-                    }
-                }
-            ]);
-
-            cachedStats = {
-                period,
-                startDate,
-                endDate: new Date(),
-                revenue: {
-                    platformFee: platformRevenue[0]?.totalPlatformFee || 0,
-                    totalGames: platformRevenue[0]?.totalGames || 0,
-                    totalPrizePool: platformRevenue[0]?.totalPrizePool || 0
-                },
-                transactions: {},
-                chartData: {}
-            };
-
-            revenueData.forEach(item => {
-                cachedStats.transactions[item._id] = {
-                    totalAmount: item.totalAmount,
-                    totalCount: item.totalCount,
-                    averageAmount: Math.round(item.totalAmount / item.totalCount)
-                };
-                cachedStats.chartData[item._id] = item.dailyData;
+        if (!withdrawalRequest) {
+            return res.status(404).json({
+                success: false,
+                message: 'Withdrawal request not found'
             });
-
-            // Cache for 15 minutes
-            cache.set(cacheKey, cachedStats, 900);
         }
 
         res.status(200).json({
             success: true,
-            data: cachedStats
+            data: {
+                withdrawalRequest
+            }
         });
 
     } catch (error) {
-        console.error('Get revenue stats error:', error);
+        console.error('Get withdrawal request details error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to get revenue statistics'
+            message: 'Failed to get withdrawal request details'
+        });
+    }
+};
+
+export const approveWithdrawalRequest = async (req, res) => {
+    try {
+        const adminId = req.admin._id;
+        const { requestId } = req.params;
+        const { notes = '', paymentProof = '' } = req.body;
+
+        const withdrawalRequest = await WithdrawalRequest.findById(requestId);
+        if (!withdrawalRequest) {
+            return res.status(404).json({
+                success: false,
+                message: 'Withdrawal request not found'
+            });
+        }
+
+        if (withdrawalRequest.status !== 'pending') {
+            return res.status(400).json({
+                success: false,
+                message: 'Only pending withdrawal requests can be approved'
+            });
+        }
+
+        // Approve withdrawal
+        await withdrawalRequest.approve(adminId, notes);
+
+        // Update payment proof if provided
+        if (paymentProof) {
+            withdrawalRequest.paymentProof = paymentProof;
+            await withdrawalRequest.save();
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Withdrawal request approved successfully',
+            data: {
+                withdrawalRequest: {
+                    _id: withdrawalRequest._id,
+                    status: withdrawalRequest.status,
+                    processedAt: withdrawalRequest.processedAt,
+                    adminNotes: withdrawalRequest.adminNotes
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Approve withdrawal request error:', error);
+        res.status(500).json({
+            success: false,
+            message: error.message || 'Failed to approve withdrawal request'
+        });
+    }
+};
+
+export const rejectWithdrawalRequest = async (req, res) => {
+    try {
+        const adminId = req.admin._id;
+        const { requestId } = req.params;
+        const { reason } = req.body;
+
+        if (!reason || reason.trim().length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Rejection reason is required'
+            });
+        }
+
+        const withdrawalRequest = await WithdrawalRequest.findById(requestId);
+        if (!withdrawalRequest) {
+            return res.status(404).json({
+                success: false,
+                message: 'Withdrawal request not found'
+            });
+        }
+
+        if (withdrawalRequest.status !== 'pending') {
+            return res.status(400).json({
+                success: false,
+                message: 'Only pending withdrawal requests can be rejected'
+            });
+        }
+
+        // Reject withdrawal (this will automatically refund the amount)
+        await withdrawalRequest.reject(adminId, reason.trim());
+
+        res.status(200).json({
+            success: true,
+            message: 'Withdrawal request rejected and amount refunded to user',
+            data: {
+                withdrawalRequest: {
+                    _id: withdrawalRequest._id,
+                    status: withdrawalRequest.status,
+                    processedAt: withdrawalRequest.processedAt,
+                    rejectionReason: withdrawalRequest.rejectionReason
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Reject withdrawal request error:', error);
+        res.status(500).json({
+            success: false,
+            message: error.message || 'Failed to reject withdrawal request'
         });
     }
 };
@@ -527,30 +482,7 @@ export const getAllUsers = async (req, res) => {
             User.countDocuments(query)
         ]);
 
-        // Add additional stats for each user
-        const usersWithStats = await Promise.all(
-            users.map(async (user) => {
-                const [recentTransactions, activeRooms] = await Promise.all([
-                    Transaction.countDocuments({
-                        userId: user._id,
-                        createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
-                    }),
-                    GameRoom.countDocuments({
-                        'players.userId': user._id,
-                        status: { $in: ['waiting', 'playing'] }
-                    })
-                ]);
-
-                return {
-                    ...user,
-                    recentTransactions,
-                    activeRooms,
-                    winRate: user.totalGames > 0 ? Math.round((user.totalWins / user.totalGames) * 100) : 0
-                };
-            })
-        );
-
-        const result = buildPaginationResponse(usersWithStats, total, currentPage, currentLimit);
+        const result = buildPaginationResponse(users, total, currentPage, currentLimit);
 
         res.status(200).json({
             success: true,
@@ -570,8 +502,7 @@ export const getUserDetails = async (req, res) => {
     try {
         const { userId } = req.params;
 
-        // Get user details
-        const user = await User.findById(userId).select('-password').lean();
+        const user = await User.findById(userId).select('-password');
         if (!user) {
             return res.status(404).json({
                 success: false,
@@ -579,91 +510,24 @@ export const getUserDetails = async (req, res) => {
             });
         }
 
-        // Get user's recent activity
-        const [recentTransactions, recentRooms, monthlyStats] = await Promise.all([
-            Transaction.find({ userId })
-                .populate('gameRoomId', 'roomId')
-                .sort({ createdAt: -1 })
-                .limit(10)
-                .lean(),
+        // Get user's recent transactions
+        const recentTransactions = await Transaction.find({ userId })
+            .sort({ createdAt: -1 })
+            .limit(10)
+            .lean();
 
-            GameRoom.find({ 'players.userId': userId })
-                .populate('winner', 'name')
-                .sort({ createdAt: -1 })
-                .limit(10)
-                .lean(),
-
-            Transaction.aggregate([
-                {
-                    $match: {
-                        userId: new mongoose.Types.ObjectId(userId),
-                        createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
-                        status: 'completed'
-                    }
-                },
-                {
-                    $group: {
-                        _id: '$type',
-                        total: { $sum: '$amount' },
-                        count: { $sum: 1 }
-                    }
-                }
-            ])
-        ]);
-
-        // Format monthly stats
-        const monthlyData = {
-            deposits: 0,
-            withdrawals: 0,
-            gameWinnings: 0,
-            gameLosses: 0,
-            gamesPlayed: 0
-        };
-
-        monthlyStats.forEach(stat => {
-            switch (stat._id) {
-                case 'deposit':
-                    monthlyData.deposits = stat.total;
-                    break;
-                case 'withdrawal':
-                    monthlyData.withdrawals = stat.total;
-                    break;
-                case 'game_win':
-                    monthlyData.gameWinnings = stat.total;
-                    break;
-                case 'game_loss':
-                    monthlyData.gameLosses = stat.total;
-                    monthlyData.gamesPlayed = stat.count;
-                    break;
-            }
-        });
+        // Get user's recent rooms
+        const recentRooms = await GameRoom.find({ 'players.userId': userId })
+            .sort({ createdAt: -1 })
+            .limit(5)
+            .lean();
 
         res.status(200).json({
             success: true,
             data: {
-                user: {
-                    ...user,
-                    winRate: user.totalGames > 0 ? Math.round((user.totalWins / user.totalGames) * 100) : 0
-                },
-                monthlyStats: monthlyData,
-                recentTransactions: recentTransactions.map(t => ({
-                    _id: t._id,
-                    type: t.type,
-                    amount: t.amount,
-                    description: t.description,
-                    status: t.status,
-                    roomId: t.gameRoomId?.roomId,
-                    createdAt: t.createdAt
-                })),
-                recentRooms: recentRooms.map(room => ({
-                    _id: room._id,
-                    roomId: room.roomId,
-                    gameType: room.gameType,
-                    amount: room.amount,
-                    status: room.status,
-                    isWinner: room.winner?._id.toString() === userId,
-                    createdAt: room.createdAt
-                }))
+                user,
+                recentTransactions,
+                recentRooms
             }
         });
 
@@ -679,9 +543,24 @@ export const getUserDetails = async (req, res) => {
 export const blockUser = async (req, res) => {
     try {
         const { userId } = req.params;
-        const { reason = 'Blocked by admin' } = req.body;
+        const { reason = '' } = req.body;
 
-        const user = await User.findById(userId);
+        const user = await User.findByIdAndUpdate(
+            userId,
+            {
+                isActive: false,
+                $push: {
+                    adminActions: {
+                        action: 'blocked',
+                        reason,
+                        adminId: req.admin._id,
+                        timestamp: new Date()
+                    }
+                }
+            },
+            { new: true }
+        ).select('-password');
+
         if (!user) {
             return res.status(404).json({
                 success: false,
@@ -689,34 +568,13 @@ export const blockUser = async (req, res) => {
             });
         }
 
-        if (!user.isActive) {
-            return res.status(400).json({
-                success: false,
-                message: 'User is already blocked'
-            });
-        }
-
-        // Block user
-        user.isActive = false;
-        await user.save();
-
-        // Cancel any active rooms created by this user
-        await GameRoom.updateMany(
-            { createdBy: userId, status: { $in: ['waiting', 'playing'] } },
-            { status: 'cancelled' }
-        );
-
         // Clear user cache
         cacheUtils.clearUserCache(userId);
 
         res.status(200).json({
             success: true,
             message: 'User blocked successfully',
-            data: {
-                userId,
-                reason,
-                blockedAt: new Date()
-            }
+            data: { user }
         });
 
     } catch (error) {
@@ -732,7 +590,21 @@ export const unblockUser = async (req, res) => {
     try {
         const { userId } = req.params;
 
-        const user = await User.findById(userId);
+        const user = await User.findByIdAndUpdate(
+            userId,
+            {
+                isActive: true,
+                $push: {
+                    adminActions: {
+                        action: 'unblocked',
+                        adminId: req.admin._id,
+                        timestamp: new Date()
+                    }
+                }
+            },
+            { new: true }
+        ).select('-password');
+
         if (!user) {
             return res.status(404).json({
                 success: false,
@@ -740,27 +612,13 @@ export const unblockUser = async (req, res) => {
             });
         }
 
-        if (user.isActive) {
-            return res.status(400).json({
-                success: false,
-                message: 'User is not blocked'
-            });
-        }
-
-        // Unblock user
-        user.isActive = true;
-        await user.save();
-
         // Clear user cache
         cacheUtils.clearUserCache(userId);
 
         res.status(200).json({
             success: true,
             message: 'User unblocked successfully',
-            data: {
-                userId,
-                unblockedAt: new Date()
-            }
+            data: { user }
         });
 
     } catch (error) {
@@ -777,10 +635,10 @@ export const updateUserBalance = async (req, res) => {
         const { userId } = req.params;
         const { amount, type, reason } = req.body;
 
-        if (amount <= 0) {
+        if (!['add', 'deduct'].includes(type)) {
             return res.status(400).json({
                 success: false,
-                message: 'Amount must be greater than 0'
+                message: 'Type must be either "add" or "deduct"'
             });
         }
 
@@ -792,25 +650,15 @@ export const updateUserBalance = async (req, res) => {
             });
         }
 
-        // Calculate new balance
-        const adjustmentAmount = type === 'add' ? amount : -amount;
-        const newBalance = user.balance + adjustmentAmount;
-
-        if (newBalance < 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'Insufficient balance for deduction'
-            });
-        }
-
-        // Create transaction
+        // Create transaction based on type
         const transactionType = type === 'add' ? 'deposit' : 'withdrawal';
+        const transactionAmount = Math.abs(amount);
         const description = `Admin ${type === 'add' ? 'added' : 'deducted'} balance - ${reason}`;
 
         const transaction = await Transaction.createWithBalanceUpdate(
             userId,
             transactionType,
-            amount,
+            transactionAmount,
             description,
             {
                 metadata: {
@@ -827,14 +675,13 @@ export const updateUserBalance = async (req, res) => {
 
         res.status(200).json({
             success: true,
-            message: `Balance ${type === 'add' ? 'added' : 'deducted'} successfully`,
+            message: `User balance ${type === 'add' ? 'increased' : 'decreased'} successfully`,
             data: {
                 transaction: {
                     _id: transaction._id,
                     amount: transaction.amount,
-                    type: transaction.type,
                     newBalance: transaction.balanceAfter,
-                    reason
+                    type: transaction.type
                 }
             }
         });
@@ -843,79 +690,7 @@ export const updateUserBalance = async (req, res) => {
         console.error('Update user balance error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to update user balance'
-        });
-    }
-};
-
-export const getUserActivity = async (req, res) => {
-    try {
-        const { userId } = req.params;
-        const { page = 1, limit = 20 } = req.query;
-
-        const { page: currentPage, limit: currentLimit, skip } = getPagination(page, limit);
-
-        // Get user activity (transactions and room activities)
-        const [transactions, rooms, totalTransactions, totalRooms] = await Promise.all([
-            Transaction.find({ userId })
-                .populate('gameRoomId', 'roomId')
-                .sort({ createdAt: -1 })
-                .skip(skip)
-                .limit(Math.floor(currentLimit / 2))
-                .lean(),
-
-            GameRoom.find({ 'players.userId': userId })
-                .populate('winner', 'name')
-                .sort({ createdAt: -1 })
-                .skip(skip)
-                .limit(Math.floor(currentLimit / 2))
-                .lean(),
-
-            Transaction.countDocuments({ userId }),
-            GameRoom.countDocuments({ 'players.userId': userId })
-        ]);
-
-        // Combine and sort activities
-        const activities = [
-            ...transactions.map(t => ({
-                type: 'transaction',
-                _id: t._id,
-                transactionType: t.type,
-                amount: t.amount,
-                description: t.description,
-                status: t.status,
-                roomId: t.gameRoomId?.roomId,
-                createdAt: t.createdAt
-            })),
-            ...rooms.map(r => ({
-                type: 'room',
-                _id: r._id,
-                roomId: r.roomId,
-                gameType: r.gameType,
-                amount: r.amount,
-                status: r.status,
-                isWinner: r.winner?._id.toString() === userId,
-                createdAt: r.createdAt
-            }))
-        ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-        const result = buildPaginationResponse(
-            activities.slice(0, currentLimit),
-            totalTransactions + totalRooms,
-            currentPage,
-            currentLimit
-        );
-
-        res.status(200).json({
-            success: true,
-            data: result
-        });
-
-    } catch (error) {
-        console.error('Get user activity error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to get user activity'
+            message: error.message || 'Failed to update user balance'
         });
     }
 };
@@ -936,11 +711,9 @@ export const getAllRooms = async (req, res) => {
 
         // Build query
         const query = {};
-
         if (status !== 'all') {
             query.status = status;
         }
-
         if (gameType !== 'all') {
             query.gameType = gameType;
         }
@@ -952,9 +725,9 @@ export const getAllRooms = async (req, res) => {
         // Get rooms
         const [rooms, total] = await Promise.all([
             GameRoom.find(query)
-                .populate('players.userId', 'name phone')
-                .populate('createdBy', 'name phone')
-                .populate('winner', 'name phone')
+                .populate('players.userId', 'name')
+                .populate('createdBy', 'name')
+                .populate('winner', 'name')
                 .sort(sort)
                 .skip(skip)
                 .limit(currentLimit)
@@ -982,12 +755,10 @@ export const getRoomDetails = async (req, res) => {
     try {
         const { roomId } = req.params;
 
-        // Find room by roomId (not _id)
         const room = await GameRoom.findOne({ roomId })
-            .populate('players.userId', 'name phone balance')
+            .populate('players.userId', 'name phone')
             .populate('createdBy', 'name phone')
-            .populate('winner', 'name phone')
-            .lean();
+            .populate('winner', 'name phone');
 
         if (!room) {
             return res.status(404).json({
@@ -999,22 +770,13 @@ export const getRoomDetails = async (req, res) => {
         // Get related transactions
         const transactions = await Transaction.find({ gameRoomId: room._id })
             .populate('userId', 'name phone')
-            .sort({ createdAt: -1 })
-            .lean();
+            .sort({ createdAt: -1 });
 
         res.status(200).json({
             success: true,
             data: {
                 room,
-                transactions: transactions.map(t => ({
-                    _id: t._id,
-                    type: t.type,
-                    amount: t.amount,
-                    description: t.description,
-                    status: t.status,
-                    user: t.userId,
-                    createdAt: t.createdAt
-                }))
+                transactions
             }
         });
 
@@ -1032,11 +794,7 @@ export const declareCorrectWinner = async (req, res) => {
         const { roomId } = req.params;
         const { winnerId, reason } = req.body;
 
-        // Find room
-        const room = await GameRoom.findOne({ roomId })
-            .populate('players.userId', 'name')
-            .populate('winner', 'name');
-
+        const room = await GameRoom.findOne({ roomId });
         if (!room) {
             return res.status(404).json({
                 success: false,
@@ -1044,207 +802,66 @@ export const declareCorrectWinner = async (req, res) => {
             });
         }
 
-        if (room.status !== 'completed') {
-            return res.status(400).json({
-                success: false,
-                message: 'Can only correct winner for completed games'
-            });
-        }
-
-        // Check if new winner is in the room
         if (!room.hasPlayer(winnerId)) {
             return res.status(400).json({
                 success: false,
-                message: 'New winner must be a player in the room'
+                message: 'Winner must be a player in the room'
             });
         }
 
-        const oldWinnerId = room.winner ? room.winner._id : null;
+        // Complete the game with correct winner
+        room.completeGame(winnerId);
+        await room.save();
 
-        if (!oldWinnerId) {
-            return res.status(400).json({
-                success: false,
-                message: 'No previous winner found for this room'
-            });
-        }
+        // Create winning transaction
+        const totalAmount = room.amount * room.players.length;
+        const platformFeePercent = parseInt(process.env.PLATFORM_FEE_PERCENTAGE) || 10;
+        const platformFee = Math.floor(totalAmount * platformFeePercent / 100);
+        const winnerAmount = totalAmount - platformFee;
 
-        if (oldWinnerId.toString() === winnerId.toString()) {
-            return res.status(400).json({
-                success: false,
-                message: 'This user is already the winner'
-            });
-        }
-
-        // Retry logic for handling write conflicts
-        const maxRetries = 3;
-        let retryCount = 0;
-        let finalOldBalance = 0;
-        let finalNewBalance = 0;
-
-        while (retryCount < maxRetries) {
-            const session = await mongoose.startSession();
-
-            try {
-                await session.withTransaction(async () => {
-                    // Get fresh data within transaction to avoid conflicts
-                    const [currentRoom, oldWinner, newWinner] = await Promise.all([
-                        GameRoom.findOne({ roomId }).session(session),
-                        User.findById(oldWinnerId).session(session),
-                        User.findById(winnerId).session(session)
-                    ]);
-
-                    if (!currentRoom || !oldWinner || !newWinner) {
-                        throw new Error('Required data not found');
-                    }
-
-                    // Check old winner's current balance
-                    if (oldWinner.balance < room.winnerAmount) {
-                        throw new Error('Old winner has insufficient balance for correction');
-                    }
-
-                    // Step 1: Deduct amount from old winner
-                    oldWinner.balance -= room.winnerAmount;
-                    oldWinner.totalWins = Math.max(0, oldWinner.totalWins - 1);
-                    oldWinner.totalWinnings = Math.max(0, oldWinner.totalWinnings - room.winnerAmount);
-
-                    // Step 2: Add amount to new winner
-                    newWinner.balance += room.winnerAmount;
-                    newWinner.totalWins += 1;
-                    newWinner.totalWinnings += room.winnerAmount;
-
-                    // Step 3: Update room winner
-                    currentRoom.winner = winnerId;
-
-                    // Step 4: Save all changes
-                    await Promise.all([
-                        oldWinner.save({ session }),
-                        newWinner.save({ session }),
-                        currentRoom.save({ session })
-                    ]);
-
-                    // Step 5: Create transaction records
-                    const timestamp = new Date();
-                    const transactionData = [
-                        {
-                            userId: oldWinnerId,
-                            type: 'withdrawal',
-                            amount: room.winnerAmount,
-                            description: `Admin Correction - Reversed incorrect win for Room ${room.roomId}`,
-                            status: 'completed',
-                            gameRoomId: room._id,
-                            balanceBefore: oldWinner.balance + room.winnerAmount,
-                            balanceAfter: oldWinner.balance,
-                            transactionId: `TXN${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
-                            metadata: {
-                                adminCorrection: true,
-                                adminId: req.admin._id,
-                                reason,
-                                correctionType: 'winner_reversal'
-                            },
-                            createdAt: timestamp,
-                            updatedAt: timestamp
-                        },
-                        {
-                            userId: winnerId,
-                            type: 'game_win',
-                            amount: room.winnerAmount,
-                            description: `Admin Correction - Correct winner declared for Room ${room.roomId}`,
-                            status: 'completed',
-                            gameRoomId: room._id,
-                            balanceBefore: newWinner.balance - room.winnerAmount,
-                            balanceAfter: newWinner.balance,
-                            transactionId: `TXN${Date.now() + 1}${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
-                            metadata: {
-                                adminCorrection: true,
-                                adminId: req.admin._id,
-                                reason,
-                                previousWinner: oldWinnerId,
-                                correctionType: 'winner_declaration'
-                            },
-                            createdAt: timestamp,
-                            updatedAt: timestamp
-                        }
-                    ];
-
-                    await Transaction.insertMany(transactionData, { session });
-
-                    // Store final balances for response
-                    finalOldBalance = oldWinner.balance;
-                    finalNewBalance = newWinner.balance;
-                }, {
-                    readPreference: 'primary',
-                    readConcern: { level: 'majority' },
-                    writeConcern: { w: 'majority' }
-                });
-
-                // Transaction completed successfully
-                await session.endSession();
-
-                // Clear caches after successful transaction
-                cacheUtils.clearRoomsCache();
-                cacheUtils.clearUserCache(oldWinnerId);
-                cacheUtils.clearUserCache(winnerId);
-                cache.del(cacheUtils.balanceKey(oldWinnerId));
-                cache.del(cacheUtils.balanceKey(winnerId));
-
-                // Get updated user details for response
-                const [oldWinnerDetails, newWinnerDetails] = await Promise.all([
-                    User.findById(oldWinnerId).select('name balance'),
-                    User.findById(winnerId).select('name balance')
-                ]);
-
-                return res.status(200).json({
-                    success: true,
-                    message: 'Winner corrected successfully',
-                    data: {
-                        roomId: room.roomId,
-                        previousWinner: {
-                            _id: oldWinnerId,
-                            name: oldWinnerDetails?.name,
-                            newBalance: oldWinnerDetails?.balance
-                        },
-                        newWinner: {
-                            _id: winnerId,
-                            name: newWinnerDetails?.name,
-                            newBalance: newWinnerDetails?.balance
-                        },
-                        amount: room.winnerAmount,
-                        reason,
-                        correctedAt: new Date(),
-                        correctedBy: req.admin.username
-                    }
-                });
-
-            } catch (error) {
-                await session.endSession();
-
-                // Check if it's a write conflict error
-                if (error.code === 112 || error.message.includes('Write conflict') || error.message.includes('WriteConflict')) {
-                    retryCount++;
-                    console.log(`Write conflict detected, retry ${retryCount}/${maxRetries}`);
-
-                    if (retryCount < maxRetries) {
-                        // Wait before retrying with exponential backoff
-                        await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 100));
-                        continue;
-                    }
+        await Transaction.createWithBalanceUpdate(
+            winnerId,
+            'game_win',
+            winnerAmount,
+            `Game Won - Room ${room.roomId} (Admin declared)`,
+            {
+                gameRoomId: room._id,
+                metadata: {
+                    adminDeclared: true,
+                    adminId: req.admin._id,
+                    reason
                 }
-
-                console.error('Winner correction error:', error);
-                throw error;
             }
+        );
+
+        // Update winner's game stats
+        const winner = await User.findById(winnerId);
+        if (winner) {
+            await winner.incrementGameStats(true, winnerAmount);
         }
 
-        // If we reach here, all retries failed
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to correct winner after multiple attempts. Please try again.'
+        // Clear caches
+        cacheUtils.clearRoomsCache();
+
+        res.status(200).json({
+            success: true,
+            message: 'Winner declared successfully',
+            data: {
+                room: {
+                    _id: room._id,
+                    roomId: room.roomId,
+                    status: room.status,
+                    winner: room.winner,
+                    winnerAmount
+                }
+            }
         });
+
     } catch (error) {
         console.error('Declare correct winner error:', error);
         res.status(500).json({
             success: false,
-            message: error.message || 'Failed to correct winner'
+            message: error.message || 'Failed to declare winner'
         });
     }
 };
@@ -1254,10 +871,7 @@ export const cancelRoom = async (req, res) => {
         const { roomId } = req.params;
         const { reason } = req.body;
 
-        // Find room
-        const room = await GameRoom.findOne({ roomId })
-            .populate('players.userId', 'name');
-
+        const room = await GameRoom.findOne({ roomId });
         if (!room) {
             return res.status(404).json({
                 success: false,
@@ -1265,80 +879,55 @@ export const cancelRoom = async (req, res) => {
             });
         }
 
-        if (room.status === 'cancelled') {
+        if (room.status === 'completed' || room.status === 'cancelled') {
             return res.status(400).json({
                 success: false,
-                message: 'Room is already cancelled'
+                message: 'Room is already completed or cancelled'
             });
         }
 
-        if (room.status === 'completed') {
-            return res.status(400).json({
-                success: false,
-                message: 'Cannot cancel completed room'
-            });
-        }
+        // Cancel room
+        room.status = 'cancelled';
+        await room.save();
 
-        const session = await mongoose.startSession();
-
-        try {
-            session.startTransaction();
-
-            // Refund all players
-            for (const player of room.players) {
-                await Transaction.createWithBalanceUpdate(
-                    player.userId._id,
-                    'refund',
-                    room.amount,
-                    `Room cancelled by admin - ${reason}`,
-                    {
-                        gameRoomId: room._id,
-                        metadata: {
-                            adminAction: true,
-                            adminId: req.admin._id,
-                            reason
-                        }
+        // Refund all players
+        for (const player of room.players) {
+            await Transaction.createWithBalanceUpdate(
+                player.userId,
+                'refund',
+                room.amount,
+                `Room cancelled - ${room.roomId} (${reason})`,
+                {
+                    gameRoomId: room._id,
+                    metadata: {
+                        adminCancelled: true,
+                        adminId: req.admin._id,
+                        reason
                     }
-                );
-            }
-
-            // Cancel room
-            room.status = 'cancelled';
-            await room.save({ session });
-
-            await session.commitTransaction();
-
-            // Clear caches
-            cacheUtils.clearRoomsCache();
-            for (const player of room.players) {
-                cacheUtils.clearUserCache(player.userId._id);
-                cache.del(cacheUtils.balanceKey(player.userId._id));
-            }
-
-            res.status(200).json({
-                success: true,
-                message: 'Room cancelled and players refunded successfully',
-                data: {
-                    roomId: room.roomId,
-                    refundedPlayers: room.players.length,
-                    refundAmount: room.amount,
-                    reason,
-                    cancelledAt: new Date()
                 }
-            });
-
-        } catch (error) {
-            await session.abortTransaction();
-            throw error;
-        } finally {
-            session.endSession();
+            );
         }
+
+        // Clear caches
+        cacheUtils.clearRoomsCache();
+
+        res.status(200).json({
+            success: true,
+            message: 'Room cancelled and all players refunded',
+            data: {
+                room: {
+                    _id: room._id,
+                    roomId: room.roomId,
+                    status: room.status
+                }
+            }
+        });
 
     } catch (error) {
         console.error('Cancel room error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to cancel room'
+            message: error.message || 'Failed to cancel room'
         });
     }
 };
@@ -1362,19 +951,15 @@ export const getAllTransactions = async (req, res) => {
 
         // Build query
         const query = {};
-
         if (type !== 'all') {
             query.type = type;
         }
-
         if (status !== 'all') {
             query.status = status;
         }
-
         if (userId) {
             query.userId = userId;
         }
-
         if (startDate || endDate) {
             query.createdAt = {};
             if (startDate) {
@@ -1393,7 +978,7 @@ export const getAllTransactions = async (req, res) => {
         const [transactions, total] = await Promise.all([
             Transaction.find(query)
                 .populate('userId', 'name phone')
-                .populate('gameRoomId', 'roomId gameType')
+                .populate('gameRoomId', 'roomId')
                 .sort(sort)
                 .skip(skip)
                 .limit(currentLimit)
@@ -1423,8 +1008,7 @@ export const getTransactionDetails = async (req, res) => {
 
         const transaction = await Transaction.findById(transactionId)
             .populate('userId', 'name phone balance')
-            .populate('gameRoomId', 'roomId gameType players winner')
-            .lean();
+            .populate('gameRoomId');
 
         if (!transaction) {
             return res.status(404).json({
@@ -1454,63 +1038,36 @@ export const processRefund = async (req, res) => {
         const { transactionId } = req.params;
         const { reason } = req.body;
 
-        const originalTransaction = await Transaction.findById(transactionId)
-            .populate('userId', 'name');
-
-        if (!originalTransaction) {
+        const transaction = await Transaction.findById(transactionId);
+        if (!transaction) {
             return res.status(404).json({
                 success: false,
                 message: 'Transaction not found'
             });
         }
 
-        if (originalTransaction.status !== 'completed') {
+        if (transaction.type === 'refund') {
             return res.status(400).json({
                 success: false,
-                message: 'Can only refund completed transactions'
-            });
-        }
-
-        // Check if already refunded
-        const existingRefund = await Transaction.findOne({
-            'metadata.originalTransactionId': transactionId,
-            type: 'refund'
-        });
-
-        if (existingRefund) {
-            return res.status(400).json({
-                success: false,
-                message: 'Transaction has already been refunded'
-            });
-        }
-
-        // Only allow refund for certain transaction types
-        if (!['withdrawal', 'game_loss'].includes(originalTransaction.type)) {
-            return res.status(400).json({
-                success: false,
-                message: 'This transaction type cannot be refunded'
+                message: 'Cannot refund a refund transaction'
             });
         }
 
         // Create refund transaction
         const refundTransaction = await Transaction.createWithBalanceUpdate(
-            originalTransaction.userId._id,
+            transaction.userId,
             'refund',
-            originalTransaction.amount,
-            `Admin refund - ${reason}`,
+            transaction.amount,
+            `Refund for transaction ${transaction.transactionId} - ${reason}`,
             {
                 metadata: {
+                    originalTransactionId: transaction._id,
                     adminRefund: true,
                     adminId: req.admin._id,
-                    originalTransactionId: transactionId,
                     reason
                 }
             }
         );
-
-        // Clear user cache
-        cacheUtils.clearUserCache(originalTransaction.userId._id);
-        cache.del(cacheUtils.balanceKey(originalTransaction.userId._id));
 
         res.status(200).json({
             success: true,
@@ -1519,8 +1076,7 @@ export const processRefund = async (req, res) => {
                 refundTransaction: {
                     _id: refundTransaction._id,
                     amount: refundTransaction.amount,
-                    newBalance: refundTransaction.balanceAfter,
-                    reason
+                    transactionId: refundTransaction.transactionId
                 }
             }
         });
@@ -1529,12 +1085,186 @@ export const processRefund = async (req, res) => {
         console.error('Process refund error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to process refund'
+            message: error.message || 'Failed to process refund'
         });
     }
 };
 
-// Data Export
+// System Stats
+export const getSystemStats = async (req, res) => {
+    try {
+        const cacheKey = 'admin_system_stats';
+        let cachedStats = cache.get(cacheKey);
+
+        if (!cachedStats) {
+            const [
+                totalUsers,
+                totalRooms,
+                totalTransactions,
+                totalRevenue
+            ] = await Promise.all([
+                User.countDocuments(),
+                GameRoom.countDocuments(),
+                Transaction.countDocuments(),
+                Transaction.aggregate([
+                    {
+                        $match: {
+                            type: 'game_loss',
+                            status: 'completed'
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: null,
+                            total: { $sum: '$amount' }
+                        }
+                    }
+                ])
+            ]);
+
+            const platformRevenue = totalRevenue[0] ? Math.floor(totalRevenue[0].total * 0.1) : 0;
+
+            cachedStats = {
+                totalUsers,
+                totalRooms,
+                totalTransactions,
+                platformRevenue,
+                cacheStats: cache.getStats()
+            };
+
+            // Cache for 10 minutes
+            cache.set(cacheKey, cachedStats, 600);
+        }
+
+        res.status(200).json({
+            success: true,
+            data: cachedStats
+        });
+
+    } catch (error) {
+        console.error('Get system stats error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get system statistics'
+        });
+    }
+};
+
+export const getRevenueStats = async (req, res) => {
+    try {
+        const { period = '30d' } = req.query;
+
+        // Calculate date range
+        let startDate = new Date();
+        switch (period) {
+            case '7d':
+                startDate.setDate(startDate.getDate() - 7);
+                break;
+            case '30d':
+                startDate.setDate(startDate.getDate() - 30);
+                break;
+            case '90d':
+                startDate.setDate(startDate.getDate() - 90);
+                break;
+            case '1y':
+                startDate.setFullYear(startDate.getFullYear() - 1);
+                break;
+            default:
+                startDate.setDate(startDate.getDate() - 30);
+        }
+
+        const revenueStats = await Transaction.aggregate([
+            {
+                $match: {
+                    type: 'game_loss',
+                    status: 'completed',
+                    createdAt: { $gte: startDate }
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        $dateToString: {
+                            format: '%Y-%m-%d',
+                            date: '$createdAt'
+                        }
+                    },
+                    totalGames: { $sum: '$amount' },
+                    gameCount: { $sum: 1 }
+                }
+            },
+            {
+                $project: {
+                    date: '$_id',
+                    totalGames: 1,
+                    gameCount: 1,
+                    platformRevenue: { $multiply: ['$totalGames', 0.1] }
+                }
+            },
+            {
+                $sort: { date: 1 }
+            }
+        ]);
+
+        res.status(200).json({
+            success: true,
+            data: {
+                period,
+                startDate,
+                endDate: new Date(),
+                revenueData: revenueStats
+            }
+        });
+
+    } catch (error) {
+        console.error('Get revenue stats error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get revenue statistics'
+        });
+    }
+};
+
+export const getUserActivity = async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { page = 1, limit = 20 } = req.query;
+
+        const { page: currentPage, limit: currentLimit, skip } = getPagination(page, limit);
+
+        // Get user's activity (transactions and rooms)
+        const [transactions, rooms, total] = await Promise.all([
+            Transaction.find({ userId })
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(currentLimit)
+                .lean(),
+            GameRoom.find({ 'players.userId': userId })
+                .sort({ createdAt: -1 })
+                .limit(5)
+                .lean(),
+            Transaction.countDocuments({ userId })
+        ]);
+
+        const result = buildPaginationResponse(transactions, total, currentPage, currentLimit);
+
+        res.status(200).json({
+            success: true,
+            data: {
+                ...result,
+                recentRooms: rooms
+            }
+        });
+
+    } catch (error) {
+        console.error('Get user activity error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get user activity'
+        });
+    }
+};
+
 export const exportData = async (req, res) => {
     try {
         const { type } = req.params;
@@ -1553,33 +1283,22 @@ export const exportData = async (req, res) => {
         }
 
         let data = [];
-        let filename = '';
 
         switch (type) {
             case 'users':
-                data = await User.find(dateFilter)
-                    .select('-password')
-                    .lean();
-                filename = `users_export_${Date.now()}.json`;
+                data = await User.find(dateFilter).select('-password').lean();
                 break;
-
             case 'transactions':
                 data = await Transaction.find(dateFilter)
                     .populate('userId', 'name phone')
-                    .populate('gameRoomId', 'roomId')
                     .lean();
-                filename = `transactions_export_${Date.now()}.json`;
                 break;
-
             case 'rooms':
                 data = await GameRoom.find(dateFilter)
-                    .populate('players.userId', 'name phone')
-                    .populate('createdBy', 'name phone')
-                    .populate('winner', 'name phone')
+                    .populate('players.userId', 'name')
+                    .populate('createdBy', 'name')
                     .lean();
-                filename = `rooms_export_${Date.now()}.json`;
                 break;
-
             default:
                 return res.status(400).json({
                     success: false,
@@ -1587,14 +1306,13 @@ export const exportData = async (req, res) => {
                 });
         }
 
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
         res.status(200).json({
             success: true,
-            exportType: type,
-            exportDate: new Date(),
-            totalRecords: data.length,
-            data
+            data: {
+                type,
+                count: data.length,
+                exportData: data
+            }
         });
 
     } catch (error) {
@@ -1606,13 +1324,13 @@ export const exportData = async (req, res) => {
     }
 };
 
-// Winner Verification Management
+// Winner Request Management
 export const getWinnerRequests = async (req, res) => {
     try {
         const {
+            status = 'all',
             page = 1,
             limit = 20,
-            status = 'all',
             sortBy = 'createdAt',
             sortOrder = 'desc'
         } = req.query;
@@ -1630,9 +1348,9 @@ export const getWinnerRequests = async (req, res) => {
         sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
 
         // Get winner requests
-        const [requests, total] = await Promise.all([
+        const [winnerRequests, total] = await Promise.all([
             WinnerRequest.find(query)
-                .populate('gameRoomId', 'roomId gameType players')
+                .populate('gameRoomId')
                 .populate('declaredBy', 'name phone')
                 .populate('declaredWinner', 'name phone')
                 .populate('processedBy', 'username')
@@ -1643,7 +1361,7 @@ export const getWinnerRequests = async (req, res) => {
             WinnerRequest.countDocuments(query)
         ]);
 
-        const result = buildPaginationResponse(requests, total, currentPage, currentLimit);
+        const result = buildPaginationResponse(winnerRequests, total, currentPage, currentLimit);
 
         res.status(200).json({
             success: true,
@@ -1663,48 +1381,29 @@ export const getWinnerRequestDetails = async (req, res) => {
     try {
         const { requestId } = req.params;
 
-        const request = await WinnerRequest.findById(requestId)
+        const winnerRequest = await WinnerRequest.findById(requestId)
             .populate({
                 path: 'gameRoomId',
-                select: 'roomId gameType amount players createdAt startedAt',
-                populate: {
-                    path: 'players.userId',
-                    select: 'name phone'
-                }
+                populate: [
+                    { path: 'players.userId', select: 'name phone' },
+                    { path: 'createdBy', select: 'name phone' }
+                ]
             })
             .populate('declaredBy', 'name phone balance')
             .populate('declaredWinner', 'name phone balance')
-            .populate('processedBy', 'username')
-            .lean();
+            .populate('processedBy', 'username');
 
-        if (!request) {
+        if (!winnerRequest) {
             return res.status(404).json({
                 success: false,
                 message: 'Winner request not found'
             });
         }
 
-        // Get related transactions for this room
-        const roomTransactions = await Transaction.find({
-            gameRoomId: request.gameRoomId._id
-        })
-            .populate('userId', 'name phone')
-            .sort({ createdAt: -1 })
-            .lean();
-
         res.status(200).json({
             success: true,
             data: {
-                request,
-                roomTransactions: roomTransactions.map(t => ({
-                    _id: t._id,
-                    type: t.type,
-                    amount: t.amount,
-                    description: t.description,
-                    status: t.status,
-                    user: t.userId,
-                    createdAt: t.createdAt
-                }))
+                winnerRequest
             }
         });
 
@@ -1719,192 +1418,152 @@ export const getWinnerRequestDetails = async (req, res) => {
 
 export const approveWinnerRequest = async (req, res) => {
     try {
+        const adminId = req.admin._id;
         const { requestId } = req.params;
         const { notes = '' } = req.body;
-        const adminId = req.admin._id;
 
-        const request = await WinnerRequest.findById(requestId)
-            .populate('gameRoomId')
-            .populate('declaredWinner', 'name');
+        const winnerRequest = await WinnerRequest.findById(requestId)
+            .populate('gameRoomId');
 
-        if (!request) {
+        if (!winnerRequest) {
             return res.status(404).json({
                 success: false,
                 message: 'Winner request not found'
             });
         }
 
-        if (request.status !== 'pending') {
+        if (winnerRequest.status !== 'pending') {
             return res.status(400).json({
                 success: false,
-                message: 'Request has already been processed'
+                message: 'Only pending winner requests can be approved'
             });
         }
 
-        const session = await mongoose.startSession();
+        // Approve winner request
+        winnerRequest.status = 'approved';
+        winnerRequest.processedAt = new Date();
+        winnerRequest.processedBy = adminId;
+        winnerRequest.adminNotes = notes;
+        await winnerRequest.save();
 
-        try {
-            session.startTransaction();
+        // Update room status to completed
+        const room = winnerRequest.gameRoomId;
+        room.status = 'completed';
+        room.completedAt = new Date();
+        await room.save();
 
-            // Award winnings to winner
-            await Transaction.createWithBalanceUpdate(
-                request.declaredWinner._id,
-                'game_win',
-                request.winnerAmount,
-                `Game Won - Room ${request.roomId} (Admin Verified)`,
-                {
-                    gameRoomId: request.gameRoomId._id,
-                    metadata: {
-                        roomCode: request.roomId,
-                        adminVerified: true,
-                        adminId: adminId,
-                        winnerRequestId: requestId,
-                        totalPlayers: request.gameRoomId.players.length,
-                        prizePool: request.totalPrizePool,
-                        platformFee: request.platformFee
-                    }
-                }
-            );
-
-            // Update winner's game stats
-            const winner = await User.findById(request.declaredWinner._id).session(session);
-            await winner.incrementGameStats(true, request.winnerAmount);
-
-            // Update other players' stats (losses)
-            for (const player of request.gameRoomId.players) {
-                if (player.userId.toString() !== request.declaredWinner._id.toString()) {
-                    const playerUser = await User.findById(player.userId).session(session);
-                    await playerUser.incrementGameStats(false, 0);
+        // Create winning transaction
+        await Transaction.createWithBalanceUpdate(
+            winnerRequest.declaredWinner,
+            'game_win',
+            winnerRequest.winnerAmount,
+            `Game Won - Room ${room.roomId} (Admin approved)`,
+            {
+                gameRoomId: room._id,
+                metadata: {
+                    adminApproved: true,
+                    adminId,
+                    winnerRequestId: winnerRequest._id,
+                    notes
                 }
             }
+        );
 
-            // Update room status to completed
-            const room = await GameRoom.findById(request.gameRoomId._id).session(session);
-            room.status = 'completed';
-            room.completedAt = new Date();
-            await room.save({ session });
-
-            // Update winner request
-            request.status = 'approved';
-            request.adminNotes = notes;
-            request.processedBy = adminId;
-            request.processedAt = new Date();
-            await request.save({ session });
-
-            await session.commitTransaction();
-
-            // Clear caches
-            cacheUtils.clearRoomsCache();
-            cacheUtils.clearUserCache(request.declaredWinner._id);
-            cache.del(cacheUtils.balanceKey(request.declaredWinner._id));
-
-            // Clear cache for all players
-            for (const player of request.gameRoomId.players) {
-                cacheUtils.clearUserCache(player.userId);
-            }
-
-            res.status(200).json({
-                success: true,
-                message: 'Winner request approved successfully',
-                data: {
-                    requestId,
-                    roomId: request.roomId,
-                    winner: {
-                        _id: request.declaredWinner._id,
-                        name: request.declaredWinner.name
-                    },
-                    winnerAmount: request.winnerAmount,
-                    approvedAt: new Date(),
-                    approvedBy: req.admin.username
-                }
-            });
-
-        } catch (error) {
-            await session.abortTransaction();
-            throw error;
-        } finally {
-            session.endSession();
+        // Update winner's game stats
+        const winner = await User.findById(winnerRequest.declaredWinner);
+        if (winner) {
+            await winner.incrementGameStats(true, winnerRequest.winnerAmount);
         }
+
+        // Clear caches
+        cacheUtils.clearRoomsCache();
+
+        res.status(200).json({
+            success: true,
+            message: 'Winner request approved and winnings credited',
+            data: {
+                winnerRequest: {
+                    _id: winnerRequest._id,
+                    status: winnerRequest.status,
+                    processedAt: winnerRequest.processedAt,
+                    adminNotes: winnerRequest.adminNotes
+                }
+            }
+        });
 
     } catch (error) {
         console.error('Approve winner request error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to approve winner request'
+            message: error.message || 'Failed to approve winner request'
         });
     }
 };
 
 export const rejectWinnerRequest = async (req, res) => {
     try {
+        const adminId = req.admin._id;
         const { requestId } = req.params;
         const { reason } = req.body;
-        const adminId = req.admin._id;
 
-        const request = await WinnerRequest.findById(requestId)
+        if (!reason || reason.trim().length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Rejection reason is required'
+            });
+        }
+
+        const winnerRequest = await WinnerRequest.findById(requestId)
             .populate('gameRoomId');
 
-        if (!request) {
+        if (!winnerRequest) {
             return res.status(404).json({
                 success: false,
                 message: 'Winner request not found'
             });
         }
 
-        if (request.status !== 'pending') {
+        if (winnerRequest.status !== 'pending') {
             return res.status(400).json({
                 success: false,
-                message: 'Request has already been processed'
+                message: 'Only pending winner requests can be rejected'
             });
         }
 
-        const session = await mongoose.startSession();
+        // Reject winner request
+        winnerRequest.status = 'rejected';
+        winnerRequest.processedAt = new Date();
+        winnerRequest.processedBy = adminId;
+        winnerRequest.adminNotes = reason.trim();
+        await winnerRequest.save();
 
-        try {
-            session.startTransaction();
+        // Reset room status to playing so another winner can be declared
+        const room = winnerRequest.gameRoomId;
+        room.status = 'playing';
+        room.winner = null;
+        await room.save();
 
-            // Update room status back to playing
-            const room = await GameRoom.findById(request.gameRoomId._id).session(session);
-            room.status = 'playing';
-            room.winner = null;
-            await room.save({ session });
+        // Clear caches
+        cacheUtils.clearRoomsCache();
 
-            // Update winner request
-            request.status = 'rejected';
-            request.adminNotes = reason;
-            request.processedBy = adminId;
-            request.processedAt = new Date();
-            await request.save({ session });
-
-            await session.commitTransaction();
-
-            // Clear caches
-            cacheUtils.clearRoomsCache();
-
-            res.status(200).json({
-                success: true,
-                message: 'Winner request rejected successfully',
-                data: {
-                    requestId,
-                    roomId: request.roomId,
-                    reason,
-                    rejectedAt: new Date(),
-                    rejectedBy: req.admin.username
+        res.status(200).json({
+            success: true,
+            message: 'Winner request rejected. Room is back to playing status.',
+            data: {
+                winnerRequest: {
+                    _id: winnerRequest._id,
+                    status: winnerRequest.status,
+                    processedAt: winnerRequest.processedAt,
+                    adminNotes: winnerRequest.adminNotes
                 }
-            });
-
-        } catch (error) {
-            await session.abortTransaction();
-            throw error;
-        } finally {
-            session.endSession();
-        }
+            }
+        });
 
     } catch (error) {
         console.error('Reject winner request error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to reject winner request'
+            message: error.message || 'Failed to reject winner request'
         });
     }
 };

@@ -26,7 +26,11 @@ import {
     getWinnerRequests,
     getWinnerRequestDetails,
     approveWinnerRequest,
-    rejectWinnerRequest
+    rejectWinnerRequest,
+    getWithdrawalRequests,
+    getWithdrawalRequestDetails,
+    approveWithdrawalRequest,
+    rejectWithdrawalRequest
 } from '../controllers/adminController.js';
 
 const router = express.Router();
@@ -248,5 +252,181 @@ router.put('/winner-requests/:requestId/reject', [
     param('requestId').isMongoId().withMessage('Invalid request ID'),
     body('reason').trim().notEmpty().withMessage('Rejection reason is required')
 ], validateRequest, rejectWinnerRequest);
+
+// Withdrawal Request Management
+/**
+ * @swagger
+ * /api/admin/withdrawal-requests:
+ *   get:
+ *     summary: Get all withdrawal requests
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [all, pending, approved, rejected, cancelled]
+ *           default: all
+ *         description: Filter by status
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Items per page
+ *       - in: query
+ *         name: sortBy
+ *         schema:
+ *           type: string
+ *           enum: [createdAt, amount]
+ *           default: createdAt
+ *         description: Sort by field
+ *       - in: query
+ *         name: sortOrder
+ *         schema:
+ *           type: string
+ *           enum: [asc, desc]
+ *           default: desc
+ *         description: Sort order
+ *     responses:
+ *       200:
+ *         description: Withdrawal requests retrieved successfully
+ *       401:
+ *         description: Unauthorized
+ */
+router.get('/withdrawal-requests', [
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 100 }),
+    query('status').optional().isIn(['all', 'pending', 'approved', 'rejected', 'cancelled']),
+    query('sortBy').optional().isIn(['createdAt', 'amount']),
+    query('sortOrder').optional().isIn(['asc', 'desc'])
+], validateRequest, getWithdrawalRequests);
+
+/**
+ * @swagger
+ * /api/admin/withdrawal-requests/{requestId}:
+ *   get:
+ *     summary: Get withdrawal request details
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: objectId
+ *         description: Withdrawal request ID
+ *     responses:
+ *       200:
+ *         description: Withdrawal request details retrieved successfully
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Withdrawal request not found
+ */
+router.get('/withdrawal-requests/:requestId', [
+    param('requestId').isMongoId().withMessage('Invalid request ID')
+], validateRequest, getWithdrawalRequestDetails);
+
+/**
+ * @swagger
+ * /api/admin/withdrawal-requests/{requestId}/approve:
+ *   put:
+ *     summary: Approve withdrawal request
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: objectId
+ *         description: Withdrawal request ID
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notes:
+ *                 type: string
+ *                 description: Admin notes
+ *               paymentProof:
+ *                 type: string
+ *                 description: Payment proof URL or reference
+ *     responses:
+ *       200:
+ *         description: Withdrawal request approved successfully
+ *       400:
+ *         description: Cannot approve withdrawal request
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Withdrawal request not found
+ */
+router.put('/withdrawal-requests/:requestId/approve', [
+    param('requestId').isMongoId().withMessage('Invalid request ID'),
+    body('notes').optional().trim(),
+    body('paymentProof').optional().trim()
+], validateRequest, approveWithdrawalRequest);
+
+/**
+ * @swagger
+ * /api/admin/withdrawal-requests/{requestId}/reject:
+ *   put:
+ *     summary: Reject withdrawal request
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: objectId
+ *         description: Withdrawal request ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - reason
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Rejection reason
+ *     responses:
+ *       200:
+ *         description: Withdrawal request rejected and amount refunded
+ *       400:
+ *         description: Cannot reject withdrawal request or missing reason
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Withdrawal request not found
+ */
+router.put('/withdrawal-requests/:requestId/reject', [
+    param('requestId').isMongoId().withMessage('Invalid request ID'),
+    body('reason').trim().notEmpty().withMessage('Rejection reason is required')
+], validateRequest, rejectWithdrawalRequest);
 
 export default router;

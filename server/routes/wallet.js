@@ -1,12 +1,14 @@
 import express from 'express';
-import { body, query } from 'express-validator';
+import { body, query, param } from 'express-validator';
 import { validateRequest } from '../middleware/validation.js';
 import { auth } from '../middleware/auth.js';
 import {
   getBalance,
   addMoney,
   withdraw,
-  getTransactions
+  getTransactions,
+  cancelWithdrawal,
+  getWithdrawalRequests
 } from '../controllers/walletController.js';
 
 const router = express.Router();
@@ -192,6 +194,92 @@ router.post('/withdraw', [
     .matches(/^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+$/)
     .withMessage('Please enter a valid UPI ID')
 ], validateRequest, withdraw);
+
+/**
+ * @swagger
+ * /api/wallet/withdrawal-requests:
+ *   get:
+ *     summary: Get user's withdrawal requests
+ *     tags: [Wallet]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [all, pending, approved, rejected, cancelled]
+ *           default: all
+ *         description: Filter by status
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Items per page
+ *     responses:
+ *       200:
+ *         description: Withdrawal requests retrieved successfully
+ *       401:
+ *         description: Unauthorized
+ */
+// Get withdrawal requests
+router.get('/withdrawal-requests', [
+  query('status')
+    .optional()
+    .isIn(['all', 'pending', 'approved', 'rejected', 'cancelled'])
+    .withMessage('Invalid status filter'),
+  query('page')
+    .optional()
+    .isInt({ min: 1 })
+    .withMessage('Page must be a positive integer'),
+  query('limit')
+    .optional()
+    .isInt({ min: 1, max: 100 })
+    .withMessage('Limit must be between 1 and 100')
+], validateRequest, getWithdrawalRequests);
+
+/**
+ * @swagger
+ * /api/wallet/withdrawal-requests/{withdrawalId}/cancel:
+ *   post:
+ *     summary: Cancel withdrawal request
+ *     tags: [Wallet]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: withdrawalId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: objectId
+ *         description: Withdrawal request ID
+ *     responses:
+ *       200:
+ *         description: Withdrawal cancelled successfully
+ *       400:
+ *         description: Cannot cancel withdrawal
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Withdrawal request not found
+ */
+// Cancel withdrawal request
+router.post('/withdrawal-requests/:withdrawalId/cancel', [
+  param('withdrawalId')
+    .isMongoId()
+    .withMessage('Invalid withdrawal ID')
+], validateRequest, cancelWithdrawal);
 
 /**
  * @swagger

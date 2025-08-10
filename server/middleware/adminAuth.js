@@ -22,6 +22,15 @@ export const adminAuth = async (req, res, next) => {
         if (!decoded) {
             try {
                 decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+                // Check if it's an admin token
+                if (!decoded.adminId) {
+                    return res.status(401).json({
+                        success: false,
+                        message: 'Invalid admin token format.'
+                    });
+                }
+
                 // Cache the decoded token for 5 minutes
                 cache.set(cacheKey, decoded, 300);
             } catch (jwtError) {
