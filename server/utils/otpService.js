@@ -1,7 +1,20 @@
 import twilio from 'twilio';
+import dotenv from 'dotenv'
+dotenv.config();
 
-// Initialize Twilio client
-const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+// Initialize Twilio client with better error handling
+let client;
+try {
+    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+        console.error('❌ Twilio credentials missing. Please check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN in environment variables.');
+        throw new Error('Twilio credentials not configured');
+    }
+
+    client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    console.log('✅ Twilio client initialized successfully');
+} catch (error) {
+    console.error('❌ Failed to initialize Twilio client:', error.message);
+}
 
 /**
  * Validate Indian mobile number format
@@ -55,6 +68,15 @@ export const formatPhoneForTwilio = (phone) => {
  */
 export const sendOtpViaSMS = async (phone, otp) => {
     try {
+        // Check if Twilio client is initialized
+        if (!client) {
+            console.error('Twilio client not initialized. Please check your credentials.');
+            return {
+                status: false,
+                message: 'SMS service not configured properly'
+            };
+        }
+
         // Validate Indian mobile number
         if (!validateIndianMobileNumber(phone)) {
             console.error('Invalid Indian mobile number:', phone);
@@ -68,6 +90,15 @@ export const sendOtpViaSMS = async (phone, otp) => {
         const formattedPhone = formatPhoneForTwilio(phone);
 
         console.log(`Sending OTP ${otp} to phone ${formattedPhone} via Twilio`);
+
+        // Validate required environment variables
+        if (!process.env.TWILIO_PHONE_NUMBER) {
+            console.error('TWILIO_PHONE_NUMBER not configured');
+            return {
+                status: false,
+                message: 'SMS service configuration incomplete'
+            };
+        }
 
         // Create SMS message
         const message = `Your LUDO LOOTO verification code is: ${otp}. This code will expire in 5 minutes. Do not share this code with anyone.`;
@@ -83,8 +114,7 @@ export const sendOtpViaSMS = async (phone, otp) => {
             sid: twilioResponse.sid,
             status: twilioResponse.status,
             to: formattedPhone,
-            from: process.env.TWILIO_PHONE_NUMBER,
-            dateCreated: twilioResponse.dateCreated
+            from: process.env.TWILIO_PHONE_NUMBER
         });
 
         // Check if message was sent successfully
@@ -107,9 +137,12 @@ export const sendOtpViaSMS = async (phone, otp) => {
         console.error('Twilio SMS Error:', {
             message: error.message,
             code: error.code,
-            moreInfo: error.moreInfo,
-            status: error.status,
-            phone: phone
+            moreInfo: error.moreInfo || 'No additional info',
+            status: error.status || 'No status',
+            phone: phone,
+            accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Set' : 'Missing',
+            authToken: process.env.TWILIO_AUTH_TOKEN ? 'Set' : 'Missing',
+            phoneNumber: process.env.TWILIO_PHONE_NUMBER ? 'Set' : 'Missing'
         });
 
         // Handle specific Twilio errors
@@ -125,6 +158,11 @@ export const sendOtpViaSMS = async (phone, otp) => {
             errorMessage = 'Authentication error - please check Twilio credentials';
         } else if (error.code === 21606) {
             errorMessage = 'Phone number is not verified for trial account';
+        }
+
+        // Add more specific error for authentication issues
+        if (error.message && error.message.includes('username')) {
+            errorMessage = 'Twilio authentication failed - please check Account SID and Auth Token';
         }
 
         return {
@@ -191,6 +229,13 @@ export const verifyIndianPhoneNumber = (phone) => {
  */
 export const checkTwilioStatus = async () => {
     try {
+        if (!client) {
+            return {
+                status: false,
+                error: 'Twilio client not initialized'
+            };
+        }
+
         const account = await client.api.accounts(process.env.TWILIO_ACCOUNT_SID).fetch();
 
         return {
@@ -204,7 +249,12 @@ export const checkTwilioStatus = async () => {
         console.error('Twilio status check error:', error);
         return {
             status: false,
-            error: error.message
+            error: error.message,
+            details: {
+                accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Configured' : 'Missing',
+                authToken: process.env.TWILIO_AUTH_TOKEN ? 'Configured' : 'Missing',
+                phoneNumber: process.env.TWILIO_PHONE_NUMBER ? 'Configured' : 'Missing'
+            }
         };
     }
 };
